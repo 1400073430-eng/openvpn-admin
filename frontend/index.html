@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>登录 · OpenVPN 管理平台</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div class="login-page">
+    <div class="login-card">
+      <div class="login-logo">V</div>
+      <h1 class="login-title">OpenVPN 管理平台</h1>
+      <p class="login-subtitle">内网实验环境 · 请使用管理员账号登录</p>
+
+      <form id="login-form" novalidate>
+        <div class="form-group">
+          <label class="form-label" for="username">用户名</label>
+          <input class="form-input" type="text" id="username" placeholder="请输入用户名"
+                 autocomplete="username" maxlength="32" required>
+          <div class="form-error"></div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="password">密码</label>
+          <input class="form-input" type="password" id="password" placeholder="请输入密码"
+                 autocomplete="current-password" maxlength="128" required>
+          <div class="form-error"></div>
+        </div>
+
+        <button type="submit" class="btn btn-primary" id="btn-login">登录</button>
+      </form>
+
+    </div>
+  </div>
+
+  <script src="/static/js/api.js"></script>
+  <script>
+    (function () {
+      "use strict";
+
+      // 已登录则跳转首页
+      if (Auth.isLoggedIn()) {
+        window.location.href = "/pages/dashboard.html";
+        return;
+      }
+
+      var form = document.getElementById("login-form");
+      var usernameEl = document.getElementById("username");
+      var passwordEl = document.getElementById("password");
+      var btnLogin = document.getElementById("btn-login");
+
+      form.addEventListener("submit", function (e) {
+        e.preventDefault();
+        Validator.clearAllErrors(form);
+
+        var username = usernameEl.value.trim();
+        var password = passwordEl.value;
+
+        // 前端校验
+        var valid = true;
+        if (!username) {
+          Validator.showError(usernameEl, "请输入用户名");
+          valid = false;
+        } else if (!/^[a-zA-Z0-9_]{3,32}$/.test(username)) {
+          Validator.showError(usernameEl, "用户名需为 3-32 位字母数字下划线");
+          valid = false;
+        }
+        if (!password) {
+          Validator.showError(passwordEl, "请输入密码");
+          valid = false;
+        } else if (password.length < 8) {
+          Validator.showError(passwordEl, "密码至少 8 位");
+          valid = false;
+        }
+        if (!valid) return;
+
+        btnLogin.disabled = true;
+        btnLogin.textContent = "登录中...";
+
+        Api.post("/api/auth/login", {
+          username: username,
+          password: password
+        }).then(function (resp) {
+          Auth.setUser(resp.username);
+          Toast.success("登录成功");
+          setTimeout(function () {
+            window.location.href = "/pages/dashboard.html";
+          }, 400);
+        }).catch(function (err) {
+          Toast.error(err.message || "登录失败");
+          btnLogin.disabled = false;
+          btnLogin.textContent = "登录";
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

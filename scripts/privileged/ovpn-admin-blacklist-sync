@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""Root-owned, atomic domain -> nftables synchronizer.
+DNS failure keeps the last known-good address set for that domain (fail-closed).
+The firewall rule is always repaired if missing. No shell is used.
+"""
+import grp
+import ipaddress
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+DATA = Path(os.environ.get("OVPM_DATA_DIR", "/opt/openvpn-admin/data"))
+DOMAINS = DATA / "blacklist-domains.txt"
+STATE = DATA / "blacklist-state.json"
+TABLE = os.environ.get("OVPM_NFT_TABLE", "ovpn_admin")
+SET4 = os.environ.get("OVPM_NFT_SET_V4", "blocked_ipv4")
+SET6 = os.environ.get("OVPM_NFT_SET_V6", "blocked_ipv6")
+NFT = os.environ.get("OVPM_NFT_BIN", "/usr/sbin/nft")
+VPN_SUBNET4 = os.environ.get("OVPM_VPN_SUBNET", "10.8.0.0/24")
+CONF_CANDIDATES = [
+    Path(os.environ.get("OVPM_OVPN_CONFIG", "/etc/openvpn/server/server.conf")),
+    Path("/etc/openvpn/server/server.conf"),
+    Path("/etc/openvpn/server.conf"),
+]
+DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$")
+
+
+def nft(*args, input_text=None, timeout=30):
+    return subprocess.run([NFT, *args], input=input_text, capture_output=True, text=True, timeout=timeout, check=False)
+
+
+def load_networks():
+    v4 = VPN_SUBNET4
+    v6 = None
+    for conf in CONF_CANDIDATES:
+        try:
+            if not conf.is_file():
+                continue
+            for raw in conf.read_text(encoding="utf-8", errors="replace").splitlines():
+                parts = raw.strip().split()
+                if len(parts) >= 3 and parts[0] == "server":
+                    v4 = str(ipaddress.ip_network(f"{parts[1]}/{parts[2]}", strict=False))
+                elif len(parts) >= 2 and parts[0] == "server-ipv6":
+                    v6 = str(ipaddress.ip_network(parts[1], strict=False))
+            break
+        except (OSError, ValueError):
+            continue
+    return v4, v6
+
+
+def ensure_base(v4, v6):
+    r = nft("list", "table", "inet", TABLE)
+    if r.returncode != 0:
+        r = nft("add", "table", "inet", TABLE)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.strip())
+    for name, typ in ((SET4, "ipv4_addr"), (SET6, "ipv6_addr")):
+        r = nft("list", "set", "inet", TABLE, name)
+        if r.returncode != 0:
+            r = nft("add", "set", "inet", TABLE, name, "{", "type", typ + ";", "flags", "interval;", "}")
+            if r.returncode != 0:
+                raise RuntimeError(r.stderr.strip())
+    r = nft("list", "chain", "inet", TABLE, "forward")
+    if r.returncode != 0:
+        r = nft("add", "chain", "inet", TABLE, "forward", "{", "type", "filter", "hook", "forward", "priority", "-100;", "policy", "accept;", "}")
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.strip())
+    chain = nft("list", "chain", "inet", TABLE, "forward")
+    text = chain.stdout or ""
+    rule4 = f'ip saddr {v4} ip daddr @{SET4}'
+    if rule4 not in text:
+        r = nft("add", "rule", "inet", TABLE, "forward", "ip", "saddr", v4, "ip", "daddr", f"@{SET4}", "counter", "drop")
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.strip())
+    if v6:
+        rule6 = f'ip6 saddr {v6} ip6 daddr @{SET6}'
+        if rule6 not in text:
+            r = nft("add", "rule", "inet", TABLE, "forward", "ip6", "saddr", v6, "ip6", "daddr", f"@{SET6}", "counter", "drop")
+            if r.returncode != 0:
+                raise RuntimeError(r.stderr.strip())
+
+
+def load_previous_state():
+    if not STATE.exists():
+        return {}
+    try:
+        data = json.loads(STATE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("items", {}), dict):
+            raise ValueError("invalid blacklist state structure")
+        return data
+    except Exception as e:
+        # 不确定当前状态时绝不清空 nft set；保留现有拦截，避免 fail-open。
+        raise RuntimeError(f"blacklist state invalid; refusing to alter nft sets: {e}")
+
+
+def read_domains():
+    if not DOMAINS.is_file():
+        return []
+    result = []
+    for raw in DOMAINS.read_text(encoding="utf-8", errors="replace").splitlines():
+        d = raw.strip().lower().rstrip(".")
+        if d and DOMAIN_RE.fullmatch(d):
+            result.append(d)
+    return sorted(set(result))
+
+
+def resolve_one(domain):
+    addresses = set()
+    errors = []
+    try:
+        infos = socket.getaddrinfo(domain, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        for item in infos:
+            if item[4]:
+                addresses.add(str(item[4][0]))
+    except Exception as e:
+        errors.append(str(e))
+    valid = set()
+    for raw in addresses:
+        try:
+            valid.add(str(ipaddress.ip_address(raw)))
+        except ValueError:
+            pass
+    return valid, errors
+
+
+def atomic_apply(v4, v6):
+    # nft -f executes the whole transaction atomically; there is no flush-then-add gap.
+    # Both sets are updated in the same transaction so IPv4/IPv6 cannot diverge.
+    lines = [f"flush set inet {TABLE} {SET4}", f"flush set inet {TABLE} {SET6}"]
+    if v4:
+        lines.append(f"add element inet {TABLE} {SET4} {{ {', '.join(sorted(v4))} }}")
+    if v6:
+        lines.append(f"add element inet {TABLE} {SET6} {{ {', '.join(sorted(v6))} }}")
+    r = nft("-f", "-", input_text="\n".join(lines) + "\n", timeout=30)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or "nft atomic transaction failed")
+
+
+def save_state(payload):
+    DATA.mkdir(parents=True, exist_ok=True)
+    fd, tmpname = tempfile.mkstemp(prefix="blacklist-state-", suffix=".tmp", dir=str(DATA))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmpname, 0o640)
+        try:
+            os.chown(tmpname, 0, grp.getgrnam("ovpn-admin").gr_gid)
+        except Exception:
+            pass
+        os.replace(tmpname, STATE)
+    finally:
+        try:
+            os.unlink(tmpname)
+        except FileNotFoundError:
+            pass
+
+
+def main():
+    if os.geteuid() != 0:
+        print("must run as root", file=sys.stderr)
+        return 2
+    v4net, v6net = load_networks()
+    ensure_base(v4net, v6net)
+    domains = read_domains()
+    previous = load_previous_state()
+    previous_items = previous.get("items") if isinstance(previous.get("items"), dict) else {}
+    state = {}
+    v4, v6 = set(), set()
+    unresolved = []
+    retained = []
+    for d in domains:
+        addrs, errors = resolve_one(d)
+        if addrs:
+            item = {
+                "addresses": sorted(addrs),
+                "resolved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "ok": True,
+                "stale": False,
+            }
+        else:
+            old = previous_items.get(d) if isinstance(previous_items, dict) else None
+            old_addrs = set(old.get("addresses", [])) if isinstance(old, dict) else set()
+            valid_old = set()
+            for raw in old_addrs:
+                try:
+                    valid_old.add(str(ipaddress.ip_address(raw)))
+                except ValueError:
+                    pass
+            if valid_old:
+                addrs = valid_old
+                retained.append(d)
+            else:
+                addrs = set()
+            item = {
+                "addresses": sorted(addrs),
+                "resolved_at": old.get("resolved_at") if isinstance(old, dict) else None,
+                "last_attempt_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "ok": False,
+                "stale": bool(addrs),
+                "error": "; ".join(errors)[:500],
+            }
+            unresolved.append(d)
+        state[d] = item
+        for raw in addrs:
+            try:
+                addr = ipaddress.ip_address(raw)
+                (v6 if addr.version == 6 else v4).add(str(addr))
+            except ValueError:
+                pass
+    atomic_apply(v4, v6)
+    payload = {
+        "domains": len(domains),
+        "ipv4": len(v4),
+        "ipv6": len(v6),
+        "unresolved": unresolved,
+        "retained_last_known_good": retained,
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "items": state,
+    }
+    save_state(payload)
+    print(json.dumps(payload, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as e:
+        print(str(e), file=sys.stderr)
+        raise SystemExit(1)

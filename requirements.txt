@@ -1,0 +1,8 @@
+# OpenVPN 管理平台依赖
+# 使用 pip install -r requirements.txt 安装；升级前请先跑完整回归测试。
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+python-jose[cryptography]==3.5.0
+pydantic==2.13.5
+python-multipart==0.0.22
+argon2-cffi==25.1.0

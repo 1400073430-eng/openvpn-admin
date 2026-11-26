@@ -1,0 +1,8 @@
+# 强制 shell/脚本使用 Unix 换行，避免 Linux 上 $'\r' 报错
+*.sh text eol=lf
+*.py text eol=lf
+*.js text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.md text eol=lf
+*.txt text eol=lf

@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+import json, os, pwd, subprocess, sys, tempfile
+from pathlib import Path
+SPOOL = Path("/var/spool/ovpn-admin")
+HELPER = "/usr/local/sbin/ovpn-admin-priv"
+SERVICE_USER = os.environ.get("OVPM_SERVICE_USER", "ovpn-admin")
+if os.geteuid() != 0:
+    print("worker must run as root", file=sys.stderr); sys.exit(2)
+
+def read_regular_no_follow(path):
+    # O_NONBLOCK prevents a group-writable FIFO named "*.job" from hanging
+    # the root worker before fstat() can reject it.
+    fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        st = os.fstat(fd)
+        if not __import__('stat').S_ISREG(st.st_mode):
+            raise ValueError("job is not a regular file")
+        if st.st_size > 1024 * 1024:
+            raise ValueError("job file too large")
+        with os.fdopen(fd, 'r', encoding='utf-8') as f:
+            fd = -1
+            return f.read(1024 * 1024 + 1)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+def atomic_result(path, payload):
+    data = json.dumps(payload, ensure_ascii=False)
+    fd, tmp = tempfile.mkstemp(prefix=".result-", dir=str(SPOOL), text=True)
+    try:
+        # 结果文件必须由 Web 服务用户可读/可删除；spool 目录启用 sticky bit，
+        # 如果仍保持 root:root，ovpn-admin 会读不到结果且无法清理 result 文件，
+        # 最终表现为所有需要 root helper 的 API 返回 500。
+        try:
+            uid = pwd.getpwnam(SERVICE_USER).pw_uid
+            gid = pwd.getpwnam(SERVICE_USER).pw_gid
+            os.fchown(fd, uid, gid)
+        except KeyError:
+            raise RuntimeError(f"service user not found: {SERVICE_USER}")
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            fd = -1
+            f.write(data)
+            f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try: os.unlink(tmp)
+        except FileNotFoundError: pass
+
+# The spool is intentionally group-writable so the unprivileged web process can
+# submit jobs. Bound each worker pass independently of the web-side count (the
+# service account cannot list this 1730 directory). Remaining jobs are handled
+# by subsequent PathExistsGlob-triggered runs.
+MAX_JOBS_PER_RUN = 64
+try:
+    all_jobs = sorted(SPOOL.glob("*.job"))
+except OSError as e:
+    print(f"cannot scan job spool: {e}", file=sys.stderr)
+    sys.exit(1)
+
+pending_jobs = all_jobs[:MAX_JOBS_PER_RUN]
+# Reject excess jobs instead of leaving them behind (a PathExistsGlob unit may
+# not retrigger while a matching file remains present). Each overflow caller
+# receives a normal failure result and can retry once the queue drains.
+for overflow_job in all_jobs[MAX_JOBS_PER_RUN:]:
+    try:
+        atomic_result(overflow_job.with_suffix(".result"), {
+            "ok": False, "rc": 1, "stdout": "", "stderr": "job queue overflow; retry later"
+        })
+    except Exception:
+        pass
+    try:
+        overflow_job.unlink()
+    except OSError:
+        pass
+
+for job in pending_jobs:
+    res = job.with_suffix(".result")
+    try:
+        data = json.loads(read_regular_no_follow(job))
+        argv = data.get("argv") or []
+        if not isinstance(argv, list) or not all(isinstance(x, str) for x in argv):
+            raise ValueError("bad argv")
+        if len(argv) > 8:
+            raise ValueError("too many args")
+        job_timeout = data.get("timeout", 180)
+        if not isinstance(job_timeout, int) or not 5 <= job_timeout <= 240:
+            raise ValueError("bad timeout")
+        stdin_text = data.get("stdin")
+        if stdin_text is not None and (not isinstance(stdin_text, str) or len(stdin_text) > 1024 * 1024):
+            raise ValueError("bad stdin")
+        r = subprocess.run([HELPER] + argv, input=stdin_text, capture_output=True, text=True, timeout=job_timeout)
+        out = {"ok": r.returncode == 0, "rc": r.returncode,
+               "stdout": (r.stdout or "")[:200000], "stderr": (r.stderr or "")[:8000]}
+        atomic_result(res, out)
+    except Exception as e:
+        try:
+            atomic_result(res, {"ok": False, "rc": 1, "stdout": "", "stderr": str(e)})
+        except Exception:
+            pass
+    try:
+        job.unlink()
+    except OSError:
+        pass
