@@ -113,6 +113,45 @@ class PlatformRegression(unittest.TestCase):
             'username': 'new_admin', 'password': 'Test-only-password-123'
         }).status_code, 200)
 
+    def test_login_rejects_credentials_changed_before_session_creation(self):
+        original = auth.create_access_token
+        for operation in ('password', 'username'):
+            with self.subTest(operation=operation):
+                with database.get_db() as conn:
+                    conn.execute("UPDATE admins SET username = 'admin', password_hash = ?", (security.hash_password('Test-only-password-123'),))
+                def change_before_insert(username):
+                    with database.get_db() as conn:
+                        if operation == 'password':
+                            conn.execute("UPDATE admins SET password_hash = ? WHERE username = ?", (security.hash_password('Changed-password-456'), username))
+                        else:
+                            conn.execute("UPDATE admins SET username = 'renamed' WHERE username = ?", (username,))
+                        conn.execute("UPDATE auth_sessions SET revoked_at = datetime('now') WHERE username = ?", (username,))
+                    return original(username)
+                with patch.object(auth, 'create_access_token', side_effect=change_before_insert):
+                    response = self.client.post('/api/auth/login', json={'username': 'admin', 'password': 'Test-only-password-123'})
+                self.assertEqual(response.status_code, 401, response.text)
+                with database.get_db() as conn:
+                    self.assertEqual(conn.execute("SELECT count(*) FROM auth_sessions WHERE revoked_at IS NULL").fetchone()[0], 0)
+
+    def test_database_error_handler_returns_controlled_response(self):
+        import asyncio
+        from backend.main import db_error_handler
+        from starlette.requests import Request
+        response = asyncio.run(db_error_handler(Request({'type': 'http'}), database.DatabaseError('internal detail')))
+        self.assertEqual(response.status_code, 500)
+        self.assertNotIn(b'internal detail', response.body)
+
+    def test_audit_and_session_retention(self):
+        from backend.services import audit_service
+        with database.get_db() as conn:
+            conn.execute("INSERT INTO auth_sessions (jti, username, expires_at) VALUES ('expired', 'admin', datetime('now', '-1 day'))")
+            conn.execute("INSERT INTO audit_logs (username, action, created_at) VALUES ('admin', 'old', datetime('now', '-31 days'))")
+        with patch.object(audit_service, '_last_database', None):
+            audit_service.cleanup_records()
+        with database.get_db() as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM auth_sessions").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT count(*) FROM audit_logs WHERE action = 'old'").fetchone()[0], 0)
+
     def test_settings_write_and_read(self):
         self.login()
         response = self.client.put('/api/settings', json={'server_ip': '192.0.2.10', 'vpn_port': 1195})

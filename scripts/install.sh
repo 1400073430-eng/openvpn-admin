@@ -668,6 +668,10 @@ setup_app_config() {
         [[ -n "$pr" ]] && VPN_PROTO="$pr"
     fi
 
+    local admin_vpn_cidrs=""
+    if [[ -f "${INSTALL_DIR}/.env" ]]; then
+        admin_vpn_cidrs=$(sed -n 's/^OVPM_ADMIN_VPN_CIDRS=//p' "${INSTALL_DIR}/.env" | head -1)
+    fi
     cat > "${INSTALL_DIR}/.env" << EOF
 # OpenVPN 管理平台环境配置（由安装脚本生成，对齐 Nyr/openvpn-install）
 OVPM_JWT_SECRET=${JWT_SECRET}
@@ -676,6 +680,7 @@ OVPM_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD}
 OVPM_SERVER_IP=${SERVER_IP}
 OVPM_WEB_PORT=${WEB_PORT}
 OVPM_WEB_HOST=${WEB_HOST:-0.0.0.0}
+OVPM_ADMIN_VPN_CIDRS=${admin_vpn_cidrs}
 OVPM_HTTPS_ENABLED=0
 OVPM_HTTPS_PORT=443
 OVPM_ALLOWED_ORIGINS=
@@ -1641,13 +1646,17 @@ print_summary() {
     echo -e "${GREEN}       安装完成！${NC}"
     echo "============================================================"
     echo ""
-    echo "📌 管理平台访问地址："
-    echo "   http://${SERVER_IP}:${WEB_PORT}"
+    echo "📌 管理平台仅允许 VPN 网络访问："
+    echo "   1. 先导入客户端配置并连接 OpenVPN。"
+    echo "   2. 连接成功后使用以下 VPN 隧道地址访问后台："
+    PYTHONPATH="${INSTALL_DIR}" "${INSTALL_DIR}/venv/bin/python" -m backend.services.admin_address --env "${INSTALL_DIR}/.env" || true
+    echo "   公网 IP/域名不能作为管理入口；公网 VPN 连接地址保持原用途。"
+    echo "   无法连接时，请通过 SSH 检查 VPN 路由、防火墙和 OVPM_ADMIN_VPN_CIDRS。"
     echo ""
-    echo "🔐 管理员账号："
+    echo "🔐 初始管理员账号（已改名时以现有数据库账号为准）："
     echo "   用户名：${DEFAULT_ADMIN_USER}"
     if [[ "$RUN_MODE" == "repair" || "$RUN_MODE" == "diagnose" ]]; then
-        echo "   密码：  （已保留原密码，见 ${INSTALL_DIR}/.env 中 OVPM_ADMIN_PASSWORD）"
+        echo "   密码：  （保留数据库中的现有密码；.env 仅保存初始化口令，可能不是当前密码）"
     else
         echo "   密码：  ${DEFAULT_ADMIN_PASSWORD}"
         echo ""

@@ -5,12 +5,35 @@
 - 写入 SQLite + 本地文件双备份
 """
 import logging
+import threading
+import time
+from logging.handlers import RotatingFileHandler
 from typing import List, Tuple
 
 from .. import config
 from ..database import DatabaseError, get_db
 
 logger = logging.getLogger("ovpn.audit")
+
+
+_file_lock = threading.Lock()
+_cleanup_lock = threading.Lock()
+_last_cleanup = 0.0
+_last_database = None
+
+
+def cleanup_records():
+    """Retain 30 days/10,000 audit rows and remove expired/revoked sessions."""
+    global _last_cleanup, _last_database
+    with _cleanup_lock:
+        now = time.monotonic()
+        if _last_database == str(config.DATABASE_PATH) and now - _last_cleanup < 3600:
+            return
+        with get_db() as conn:
+            conn.execute("DELETE FROM auth_sessions WHERE expires_at <= datetime('now') OR revoked_at IS NOT NULL")
+            conn.execute("DELETE FROM audit_logs WHERE created_at < datetime('now', '-30 days')")
+            conn.execute("DELETE FROM audit_logs WHERE id NOT IN (SELECT id FROM audit_logs ORDER BY id DESC LIMIT 10000)")
+        _last_cleanup, _last_database = now, str(config.DATABASE_PATH)
 
 
 def log_action(username: str, action: str, detail: str = "", ip: str = "") -> None:
@@ -25,6 +48,7 @@ def log_action(username: str, action: str, detail: str = "", ip: str = "") -> No
         detail = (detail or "")[:500]
         ip = (ip or "")[:64]
 
+        cleanup_records()
         with get_db() as conn:
             conn.execute(
                 "INSERT INTO audit_logs (username, action, detail, ip) VALUES (?, ?, ?, ?)",
@@ -35,10 +59,13 @@ def log_action(username: str, action: str, detail: str = "", ip: str = "") -> No
 
     # 同时追加到文件
     try:
-        import time
-        line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] user={username} action={action} ip={ip} detail={detail}\n"
-        with open(config.AUDIT_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(line)
+        line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] user={username} action={action} ip={ip} detail={detail}"
+        with _file_lock:
+            handler = RotatingFileHandler(config.AUDIT_LOG_FILE, maxBytes=2 * 1024 * 1024, backupCount=2, encoding="utf-8")
+            try:
+                handler.emit(logging.LogRecord("audit", logging.INFO, "", 0, line, (), None))
+            finally:
+                handler.close()
     except Exception:
         pass
 

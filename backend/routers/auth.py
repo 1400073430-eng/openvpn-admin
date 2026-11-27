@@ -47,18 +47,22 @@ def _revoke_session(jti: str) -> None:
 
 
 @router.get("/captcha")
-async def captcha(request: Request):
+@login_guard.bounded_work
+def captcha(request: Request):
     import base64
-    ident, png = login_guard.issue(get_client_ip(request))
+    ident, png = login_guard.issue(request.client.host if request.client else "")
     return Response(content=__import__("json").dumps({"id": ident, "image": "data:image/png;base64," + base64.b64encode(png).decode()}), media_type="application/json", headers={"Cache-Control": "no-store"})
 
 
 @router.post("/login", response_model=LoginResponse)
-async def login(req: LoginRequest, request: Request, response: Response):
+@login_guard.bounded_work
+def login(req: LoginRequest, request: Request, response: Response):
     """登录成功后签发短期 JWT，并写入 HttpOnly Cookie。"""
-    ip = get_client_ip(request)
+    ip = request.client.host if request.client else ""
     login_guard.throttle("login", ip, 10, 60)
     login_guard.verify(req.captcha_id, req.captcha_answer, ip)
+    login_guard.throttle("account", req.username, 8, 60)
+    login_guard.throttle("password-global", "all", 30, 60)
     try:
         if is_login_locked(req.username, ip):
             log_action(req.username, "登录拒绝", "账号锁定中", ip)
@@ -75,12 +79,8 @@ async def login(req: LoginRequest, request: Request, response: Response):
                 log_action(req.username, "登录失败", "密码错误或用户不存在", ip)
                 raise HTTPException(status_code=401, detail="用户名或密码错误")
 
-            # 兼容旧 PBKDF2：第一次成功登录自动升级为 Argon2id。
-            if needs_password_rehash(row["password_hash"]):
-                conn.execute(
-                    "UPDATE admins SET password_hash = ?, updated_at = datetime('now') WHERE id = ?",
-                    (hash_password(req.password), row["id"]),
-                )
+        verified_hash = row["password_hash"]
+        upgraded_hash = hash_password(req.password) if needs_password_rehash(verified_hash) else verified_hash
 
         clear_login_failures(req.username, ip)
         token = create_access_token(row["username"])
@@ -97,6 +97,12 @@ async def login(req: LoginRequest, request: Request, response: Response):
             expires_seconds = config.JWT_EXPIRE_MINUTES * 60
 
         with get_db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute("SELECT username, password_hash FROM admins WHERE id = ?", (row["id"],)).fetchone()
+            if not current or current["username"] != row["username"] or current["password_hash"] != verified_hash:
+                raise HTTPException(status_code=401, detail="账号凭据已变更，请重新登录")
+            if upgraded_hash != verified_hash:
+                conn.execute("UPDATE admins SET password_hash = ?, updated_at = datetime('now') WHERE id = ?", (upgraded_hash, row["id"]))
             conn.execute(
                 "INSERT INTO auth_sessions (jti, username, expires_at) VALUES (?, ?, ?)",
                 (claims["jti"], row["username"], expires_at.strftime("%Y-%m-%d %H:%M:%S")),
@@ -117,7 +123,7 @@ async def login(req: LoginRequest, request: Request, response: Response):
 
 
 @router.post("/logout")
-async def logout(request: Request, response: Response, username: str = Depends(get_current_user)):
+def logout(request: Request, response: Response, username: str = Depends(get_current_user)):
     """主动吊销当前会话并删除 Cookie。"""
     try:
         _revoke_session(getattr(request.state, "auth_jti", ""))
@@ -129,15 +135,17 @@ async def logout(request: Request, response: Response, username: str = Depends(g
 
 
 @router.get("/me")
-async def get_me(username: str = Depends(get_current_user)):
+def get_me(username: str = Depends(get_current_user)):
     return {"code": 200, "message": "ok", "data": {"username": username}}
 
 
 @router.post("/change-username")
-async def change_username(req: ChangeUsernameRequest, request: Request, response: Response, username: str = Depends(get_current_user)):
+@login_guard.bounded_work
+def change_username(req: ChangeUsernameRequest, request: Request, response: Response, username: str = Depends(get_current_user)):
     """Rename the current admin and revoke all existing sessions atomically."""
     try:
         with get_db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT id, password_hash FROM admins WHERE username = ?", (username,)).fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="用户不存在")
@@ -165,10 +173,12 @@ async def change_username(req: ChangeUsernameRequest, request: Request, response
 
 
 @router.post("/change-password")
-async def change_password(req: ChangePasswordRequest, request: Request, response: Response, username: str = Depends(get_current_user)):
+@login_guard.bounded_work
+def change_password(req: ChangePasswordRequest, request: Request, response: Response, username: str = Depends(get_current_user)):
     """修改密码并吊销该账号全部旧会话，使旧 Token 立即失效。"""
     try:
         with get_db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT id, password_hash FROM admins WHERE username = ?",
                 (username,),
@@ -176,7 +186,6 @@ async def change_password(req: ChangePasswordRequest, request: Request, response
             if not row:
                 raise HTTPException(status_code=404, detail="用户不存在")
             if not verify_password(req.old_password, row["password_hash"]):
-                log_action(username, "修改密码失败", "旧密码错误", get_client_ip(request))
                 raise HTTPException(status_code=400, detail="旧密码错误")
             if req.old_password == req.new_password:
                 raise HTTPException(status_code=400, detail="新密码不能与旧密码相同")

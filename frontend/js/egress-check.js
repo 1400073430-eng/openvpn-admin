@@ -17,7 +17,7 @@
     if (!local) return '无法判断：浏览器查询失败、网络不可用或请求被拦截。';
     if (!remote) return '无法判断：浏览器存在 IPv' + version + ' 出口，但服务器出口查询未成功；需进一步核实。';
     if (local !== remote) return '疑似绕过或分流：浏览器出口与服务器不同；请检查 VPN 路由及分流规则。';
-    return '出口匹配：仅代表本次查询路径匹配，不保证 ChatGPT 等其他网站使用相同路由。';
+    return '出口匹配：仅代表本次查询路径匹配，不保证其他应用使用相同路由。';
   }
   window.EgressCheck = {normalize: normalize, compare: compare};
   var content = document.getElementById('content-area');
@@ -27,7 +27,7 @@
   panel.innerHTML = '<div class="panel-header"><h2 class="panel-title">本机 VPN 出口检查</h2></div>' +
     '<div class="panel-body"><p>请先连接 VPN。点击后浏览器将向 ipify.org 查询本机 IPv4、IPv6，查询服务会收到出口 IP。服务器对照结果可能缓存 5 分钟。</p>' +
     '<button type="button" class="btn btn-secondary mt-2" id="btn-browser-egress">检查本机出口</button>' +
-    '<div id="browser-egress-result" class="mt-2">尚未检测。本功能不直接检测 ChatGPT 的实际连接。</div></div>';
+    '<div id="browser-egress-result" class="mt-2">尚未检测。本功能不直接检测其他应用的实际连接。</div></div>';
   content.appendChild(panel);
   function lookup(version) {
     var controller = new AbortController();
