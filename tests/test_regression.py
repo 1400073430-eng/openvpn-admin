@@ -161,6 +161,26 @@ class PlatformRegression(unittest.TestCase):
         self.assertNotIn('\r', detail)
         self.assertNotIn('\x00', detail)
 
+    def test_cleanup_expires_only_stale_challenges_limits_and_sessions(self):
+        import time
+        from backend.services import audit_service, login_guard
+        now = int(time.time())
+        with database.get_db() as conn:
+            login_guard._prepare(conn, now)
+            for kind, expiry in (('old', now - 1), ('valid', now + 600)):
+                conn.execute('INSERT INTO login_limits VALUES (?, 1, ?)', (kind, expiry))
+                conn.execute('INSERT INTO login_challenges VALUES (?, ?, ?, ?)', (kind, 'digest', 'ip', expiry))
+            conn.execute("INSERT INTO auth_sessions (jti, username, expires_at) VALUES ('active', 'admin', datetime('now', '+1 hour'))")
+            conn.execute("INSERT INTO auth_sessions (jti, username, expires_at) VALUES ('expired', 'admin', datetime('now', '-1 hour'))")
+        counts = audit_service.cleanup_records(force=True)
+        self.assertEqual(counts['login_limits'], 1)
+        self.assertEqual(counts['login_challenges'], 1)
+        with database.get_db() as conn:
+            self.assertEqual([r[0] for r in conn.execute('SELECT id FROM login_challenges')], ['valid'])
+            self.assertEqual([r[0] for r in conn.execute('SELECT key FROM login_limits')], ['valid'])
+            self.assertEqual([r[0] for r in conn.execute('SELECT jti FROM auth_sessions')], ['active'])
+            self.assertEqual(conn.execute('SELECT count(*) FROM admins').fetchone()[0], 1)
+
     def test_settings_write_and_read(self):
         self.login()
         response = self.client.put('/api/settings', json={'server_ip': '192.0.2.10', 'vpn_port': 1195})

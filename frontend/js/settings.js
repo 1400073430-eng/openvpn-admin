@@ -23,6 +23,9 @@
     '<div class="panel-body"><p>手动向 ipify.org 和 ipwho.is 查询服务器出口及归属；查询服务会收到出口 IP。结果缓存 5 分钟。</p>' +
     '<button type="button" class="btn btn-secondary mt-2" id="btn-node-check">检测节点</button>' +
     '<div id="node-check-result" class="mt-2">尚未检测。此功能不检测黑名单、滥用历史或客户端泄漏。</div></div></div>' +
+    '<div class="panel"><div class="panel-header"><h2 class="panel-title">自动清理</h2></div>' +
+    '<div class="panel-body"><p>服务启动后执行一次，随后每小时清理过期验证码、限流记录和失效会话；沿用现有审计保留策略。</p>' +
+    '<p>不删除证书、账号、有效会话、升级备份或运行环境。</p><div id="maintenance-status">状态加载中...</div></div></div>' +
     // 网络配置
     '<div class="panel">' +
       '<div class="panel-header"><h2 class="panel-title">网络信息记录</h2></div>' +
@@ -109,6 +112,9 @@
   function loadSettings() {
     Api.get("/api/settings").then(function (resp) {
       var d = resp.data || {};
+      var maintenance = d.maintenance || {};
+      document.getElementById("maintenance-status").textContent = !maintenance.last_run ? "尚无本进程清理记录" :
+        "最近执行：" + maintenance.last_run + "；" + (maintenance.result === "ok" ? "执行成功" : "执行失败，下个周期重试，请检查服务日志");
 
       // 服务状态
       var svc = d.services || {};

@@ -38,7 +38,9 @@ async def get_settings(username: str = Depends(get_current_user)):
                 settings[r["key"]] = r["value"]
 
         https_enabled = bool(config.HTTPS_ENABLED and config.safe_exists(config.SSL_CERT_FILE) and config.safe_exists(config.SSL_KEY_FILE))
+        from ..services.maintenance import status as maintenance_status
         data = {
+            "maintenance": maintenance_status(),
             "paths": {
                 "easyrsa_dir": str(config.EASYRSA_DIR),
                 "openvpn_dir": str(config.OPENVPN_DIR),
