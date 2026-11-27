@@ -25,8 +25,9 @@
     '<div id="node-check-result" class="mt-2">尚未检测。此功能不检测黑名单、滥用历史或客户端泄漏。</div></div></div>' +
     // 网络配置
     '<div class="panel">' +
-      '<div class="panel-header"><h2 class="panel-title">网络配置</h2></div>' +
+      '<div class="panel-header"><h2 class="panel-title">网络信息记录</h2></div>' +
       '<div class="panel-body">' +
+        '<p class="text-secondary">此处仅保存管理平台记录，不修改 OpenVPN 配置或重启服务。</p>' +
         '<form id="form-network">' +
           '<div class="form-row">' +
             '<div class="form-group">' +
@@ -40,7 +41,7 @@
               '<div class="form-error"></div>' +
             '</div>' +
           '</div>' +
-          '<button type="button" class="btn btn-primary" id="btn-save-network">保存配置</button>' +
+          '<button type="button" class="btn btn-primary" id="btn-save-network">保存记录</button>' +
         '</form>' +
       '</div>' +
     '</div>' +
@@ -182,7 +183,7 @@
       server_ip: ip || undefined,
       vpn_port: port
     }).then(function () {
-      Toast.success("配置已保存");
+      Toast.success("网络信息记录已保存，OpenVPN 配置未修改");
       loadSettings();
     }).catch(function (err) {
       Toast.error(err.message || "保存失败");
@@ -256,7 +257,8 @@
     }).then(function () {
       Toast.success("密码修改成功，请重新登录");
       setTimeout(function () {
-        Auth.logout();
+        Auth.clear();
+        window.location.href = "/index.html";
       }, 1500);
     }).catch(function (err) {
       Toast.error(err.message || "修改失败");

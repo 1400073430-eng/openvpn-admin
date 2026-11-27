@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from backend.services.admin_address import summary, tunnel_addresses
+from backend.services.admin_address import summary, tunnel_addresses, local_health_url
 
 
 class AdminAddressTests(unittest.TestCase):
@@ -28,3 +28,9 @@ class AdminAddressTests(unittest.TestCase):
             env.write_text('OVPM_OVPN_CONFIG=' + str(conf) + '\nOVPM_SERVER_IP=203.0.113.10\n')
             with self.assertRaises(ValueError):
                 summary(env)
+
+    def test_health_probe_uses_configured_transport_and_port(self):
+        with tempfile.TemporaryDirectory() as temp:
+            env = Path(temp) / 'env'
+            env.write_text('OVPM_WEB_HOST=::\nOVPM_HTTPS_ENABLED=1\nOVPM_HTTPS_PORT=8443\n')
+            self.assertEqual(local_health_url(env), 'https://[::1]:8443/api/health')
