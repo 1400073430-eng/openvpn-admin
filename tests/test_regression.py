@@ -286,7 +286,7 @@ class MainRouteSmoke(unittest.TestCase):
         for page in ('dashboard', 'clients', 'connections', 'dns', 'audit', 'settings'):
             self.assertEqual(client.get('/pages/' + page + '.html').status_code, 200)
         self.assertEqual(client.get('/pages/unknown.html').status_code, 404)
-        self.assertEqual(app.version, '4.3.10')
+        self.assertEqual(app.version, '5.0.0')
 
 
 if __name__ == '__main__':
