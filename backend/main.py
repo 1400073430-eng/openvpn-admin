@@ -95,6 +95,8 @@ async def security_headers(request: Request, call_next):
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     # 当前允许 HTTP/IP 直连，因此暂不启用 HSTS；未来切换 HTTPS 后再打开。
     response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    if request.url.path == "/pages/settings.html":
+        response.headers["Content-Security-Policy"] += "; connect-src 'self' https://api.ipify.org https://api6.ipify.org"
     return response
 
 

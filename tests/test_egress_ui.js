@@ -1,0 +1,11 @@
+const fs = require('fs'), vm = require('vm'), assert = require('assert');
+const sandbox = {window: {}, URL, document: {getElementById() { return null; }}};
+vm.runInNewContext(fs.readFileSync('frontend/js/egress-check.js', 'utf8'), sandbox);
+const check = sandbox.window.EgressCheck;
+assert(check.compare('8.8.8.8', '8.8.8.8', 4).startsWith('出口匹配'));
+assert(check.compare('8.8.8.8', '1.1.1.1', 4).startsWith('疑似'));
+assert(check.compare(null, '1.1.1.1', 4).startsWith('无法判断'));
+assert(check.compare('8.8.8.8', null, 4).startsWith('无法判断'));
+assert(check.compare('2606:4700:0:0:0:0:0:1111', '2606:4700::1111', 6).startsWith('出口匹配'));
+assert.strictEqual(check.normalize('<script>', 6), null);
+console.log('PASS: browser egress comparison, unknown states and IPv6 normalization');
