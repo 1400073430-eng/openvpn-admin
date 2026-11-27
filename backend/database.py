@@ -7,6 +7,7 @@ SQLite 数据库模块
 """
 import sqlite3
 import logging
+import time
 from contextlib import contextmanager
 
 from fastapi import HTTPException
@@ -24,11 +25,25 @@ def _get_connection() -> sqlite3.Connection:
         timeout=15.0,  # 锁等待 15 秒
         check_same_thread=False,
     )
-    conn.row_factory = sqlite3.Row  # 结果可按列名访问
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=15000")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row  # 结果可按列名访问
+        conn.execute("PRAGMA busy_timeout=15000")
+        # journal_mode is a write operation when a new database is first opened.
+        # Concurrent Web/diagnostic startup may race before either process enables WAL.
+        for attempt in range(15):
+            try:
+                if conn.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
+                    conn.execute("PRAGMA journal_mode=WAL")
+                break
+            except sqlite3.OperationalError as exc:
+                if attempt == 14 or not any(word in str(exc).lower() for word in ("locked", "busy")):
+                    raise
+                time.sleep(0.1)
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 
 @contextmanager
