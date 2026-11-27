@@ -7,6 +7,7 @@ OpenVPN 管理平台 - FastAPI 主入口
 
 """
 import logging
+import asyncio
 from logging.handlers import RotatingFileHandler
 import sys
 from contextlib import asynccontextmanager
@@ -23,7 +24,7 @@ from .auth import get_current_user
 from .database import DatabaseError, init_database
 from .routers import audit, auth, clients, connections, dashboard, dns, easyrsa_sync, settings
 from .services.connection_tracker import tracker
-from .services import vpn_access
+from .services import vpn_access, maintenance
 from .services.frontend_render import render as render_frontend
 from .services.request_limits import RequestBodyLimitMiddleware
 from .security import is_allowed_page
@@ -66,9 +67,17 @@ async def lifespan(app: FastAPI):
         raise
 
     await tracker.start()
-    yield
-    await tracker.stop()
-    logger.info("OpenVPN 管理平台已关闭")
+    maintenance_task = asyncio.create_task(maintenance.run(), name="ovpn-maintenance")
+    try:
+        yield
+    finally:
+        maintenance_task.cancel()
+        try:
+            await maintenance_task
+        except asyncio.CancelledError:
+            pass
+        await tracker.stop()
+        logger.info("OpenVPN 管理平台已关闭")
 
 
 # ==================== 创建应用 ====================

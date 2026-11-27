@@ -22,18 +22,24 @@ _last_cleanup = 0.0
 _last_database = None
 
 
-def cleanup_records():
+def cleanup_records(force=False):
     """Retain 30 days/10,000 audit rows and remove expired/revoked sessions."""
     global _last_cleanup, _last_database
     with _cleanup_lock:
         now = time.monotonic()
-        if _last_database == str(config.DATABASE_PATH) and now - _last_cleanup < 3600:
+        if not force and _last_database == str(config.DATABASE_PATH) and now - _last_cleanup < 3600:
             return
+        counts = {}
         with get_db() as conn:
-            conn.execute("DELETE FROM auth_sessions WHERE expires_at <= datetime('now') OR revoked_at IS NOT NULL")
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            for table in ('login_limits', 'login_challenges'):
+                if table in tables:
+                    counts[table] = conn.execute('DELETE FROM ' + table + ' WHERE expires <= ?', (int(time.time()),)).rowcount
+            counts['auth_sessions'] = conn.execute("DELETE FROM auth_sessions WHERE expires_at <= datetime('now') OR revoked_at IS NOT NULL").rowcount
             conn.execute("DELETE FROM audit_logs WHERE created_at < datetime('now', '-30 days')")
             conn.execute("DELETE FROM audit_logs WHERE id NOT IN (SELECT id FROM audit_logs ORDER BY id DESC LIMIT 10000)")
         _last_cleanup, _last_database = now, str(config.DATABASE_PATH)
+        return counts
 
 
 def log_action(username: str, action: str, detail: str = "", ip: str = "") -> None:
