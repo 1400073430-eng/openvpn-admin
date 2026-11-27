@@ -7,6 +7,7 @@ OpenVPN 管理平台 - FastAPI 主入口
 
 """
 import logging
+from logging.handlers import RotatingFileHandler
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -31,7 +32,7 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(config.DATA_DIR / "app.log", encoding="utf-8"),
+        RotatingFileHandler(config.DATA_DIR / "app.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"),
     ],
 )
 logger = logging.getLogger("ovpn.main")
@@ -112,7 +113,7 @@ async def security_headers(request: Request, call_next):
 @app.exception_handler(DatabaseError)
 async def db_error_handler(request: Request, exc: DatabaseError):
     """数据库异常 → 友好提示，不暴露堆栈。"""
-    logger.error("数据库错误: %s", exc.message)
+    logger.error("数据库错误: %s", str(exc))
     return JSONResponse(
         status_code=500,
         content={"code": 500, "message": "服务器繁忙，请稍后重试", "data": None},

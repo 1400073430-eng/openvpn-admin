@@ -4,12 +4,29 @@ import hmac
 import io
 import secrets
 import time
+import threading
+from functools import wraps
 
 from fastapi import HTTPException
 from PIL import Image, ImageDraw, ImageFont
 
 from .. import config
 from ..database import get_db
+
+
+_WORK_SLOTS = threading.BoundedSemaphore(2)
+
+
+def bounded_work(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        if not _WORK_SLOTS.acquire(blocking=False):
+            raise HTTPException(429, "认证服务繁忙，请稍后再试", headers={"Retry-After": "2"})
+        try:
+            return function(*args, **kwargs)
+        finally:
+            _WORK_SLOTS.release()
+    return wrapped
 
 
 def _digest(value):
