@@ -324,22 +324,33 @@ deploy_project() {
         exit 1
     fi
 
-    # 复制后端、前端、配置
-    # 清理早期版本的顶层入口，避免 server.py/storage.py 与当前 backend 包混用。
-    # 这是 ModuleNotFoundError: No module named 'security' 的根因。
-    if [[ -f "${INSTALL_DIR}/server.py" || -f "${INSTALL_DIR}/storage.py" || -f "${INSTALL_DIR}/security.py" ]]; then
-        log_info "检测到旧版顶层入口（server.py/storage.py/security.py），清理中..."
+    python3 "${SCRIPT_DIR}/deploy_release.py" --source "$script_dir" --target "$INSTALL_DIR" --check || {
+        log_fail "部署源检查" "源码不完整或目录不安全，未覆盖旧代码"; return 1;
+    }
+    # Build dependencies in a separate permanent path before stopping the old app.
+    install_python_deps
+    # Never copy over modules while the old Web process is handling requests.
+    local old_web_active=0
+    if systemctl is-active --quiet "$APP_NAME"; then
+        old_web_active=1
+        systemctl stop "$APP_NAME" >> "$LOG_FILE" 2>&1 || {
+            log_fail "停止旧 Web 服务" "停止失败，拒绝覆盖运行中的代码"; return 1;
+        }
     fi
-    rm -f "${INSTALL_DIR}/server.py" "${INSTALL_DIR}/storage.py" "${INSTALL_DIR}/security.py" 2>/dev/null || true
-    rm -rf "${INSTALL_DIR}/__pycache__" "${INSTALL_DIR}/routers" "${INSTALL_DIR}/services" 2>/dev/null || true
-    cp -r "${script_dir}/backend" "$INSTALL_DIR/"
-    cp -r "${script_dir}/frontend" "$INSTALL_DIR/"
-    cp "${script_dir}/requirements.txt" "$INSTALL_DIR/"
-    cp "${script_dir}/CHANGELOG.md" "$INSTALL_DIR/"
-    [[ -d "${script_dir}/docs" ]] && cp -r "${script_dir}/docs" "$INSTALL_DIR/"
-    [[ -f "${script_dir}/README.md" ]] && cp "${script_dir}/README.md" "$INSTALL_DIR/" 2>/dev/null || true
-
-    log_success "项目文件部署完成（旧入口已清理，backend 包已就位）"
+    local backup_path
+    backup_path=$(python3 "${SCRIPT_DIR}/deploy_release.py" --source "$script_dir" --target "$INSTALL_DIR" --venv "$NEXT_VENV") || {
+        log_fail "代码部署" "替换失败，已尝试恢复本轮移动的代码与环境入口"
+        if [[ "$old_web_active" -eq 1 ]]; then
+            if systemctl start "$APP_NAME" >> "$LOG_FILE" 2>&1; then
+                log_info "已重新启动切换前的 Web 服务，请核对健康状态"
+            else
+                log_fail "旧服务恢复启动" "启动失败，请通过 SSH 检查日志与升级备份"
+            fi
+        fi
+        return 1;
+    }
+    log_success "代码目录精确替换完成，旧模块和字节码不再混入运行目录"
+    log_info "升级备份：${backup_path}（旧代码、旧环境入口、配置及数据库快照；不包含系统配置）"
 }
 
 # ============================================================
@@ -361,24 +372,23 @@ deploy_cli_tools() {
 # 第6步：创建 Python 虚拟环境并安装依赖
 # ============================================================
 install_python_deps() {
-    log_info "创建 Python 虚拟环境..."
-
-    if ! python3 -m venv "${INSTALL_DIR}/venv" >> "$LOG_FILE" 2>&1; then
-        log_fail "虚拟环境创建" "python3 -m venv 失败"
-        exit 1
+    log_info "在独立目录准备新 Python 环境；失败不会修改当前环境或停止旧服务"
+    NEXT_VENV=$(mktemp -d "${INSTALL_DIR}/.venv-release.XXXXXXXX")
+    chmod 0755 "$NEXT_VENV"
+    if ! (
+        umask 022
+        python3 -m venv "$NEXT_VENV" >> "$LOG_FILE" 2>&1 &&
+        "$NEXT_VENV/bin/python" -m pip install -r "${SCRIPT_DIR}/../requirements.txt" >> "$LOG_FILE" 2>&1 &&
+        "$NEXT_VENV/bin/python" -m pip check >> "$LOG_FILE" 2>&1 &&
+        env PYTHONPATH="${SCRIPT_DIR}/.." PYTHONDONTWRITEBYTECODE=1 OVPM_DATA_DIR="$NEXT_VENV/preflight-data" \
+          "$NEXT_VENV/bin/python" "${SCRIPT_DIR}/preflight_release.py" --source "${SCRIPT_DIR}/.." --target "$INSTALL_DIR" --data "$NEXT_VENV/preflight-data" >> "$LOG_FILE" 2>&1
+    ); then
+        rm -rf -- "$NEXT_VENV"
+        log_fail "新环境预检" "依赖或应用导入失败，旧代码与旧环境未覆盖，请查看日志"
+        return 1
     fi
-    log_success "虚拟环境创建: ${INSTALL_DIR}/venv"
-
-    log_info "安装 Python 依赖（FastAPI 等）..."
-    if ! "${INSTALL_DIR}/venv/bin/pip" install --upgrade pip >> "$LOG_FILE" 2>&1; then
-        log_warn "pip 升级失败，继续安装依赖"
-    fi
-
-    if ! "${INSTALL_DIR}/venv/bin/pip" install -r "${INSTALL_DIR}/requirements.txt" >> "$LOG_FILE" 2>&1; then
-        log_fail "Python 依赖安装" "pip install 失败，请检查网络或 requirements.txt"
-        exit 1
-    fi
-    log_success "Python 依赖安装完成"
+    rm -rf -- "$NEXT_VENV/preflight-data"
+    log_success "新环境依赖及应用导入检查通过，代码切换时才激活"
 }
 
 # ============================================================
@@ -760,9 +770,12 @@ setup_service_user() {
     fi
 
     mkdir -p "${INSTALL_DIR}/data" "${INSTALL_DIR}/logs" /etc/openvpn-admin
-    chown -R "${APP_USER}:${APP_GROUP}" "${INSTALL_DIR}"
+    # Code, virtual environments and root-only upgrade snapshots stay root-owned.
+    chown root:"${APP_GROUP}" "${INSTALL_DIR}"
+    chown -R "${APP_USER}:${APP_GROUP}" "${INSTALL_DIR}/data" "${INSTALL_DIR}/logs"
     chmod 0750 "${INSTALL_DIR}" "${INSTALL_DIR}/data" "${INSTALL_DIR}/logs"
-    chmod 0600 "${INSTALL_DIR}/.env"
+    chown root:"${APP_GROUP}" "${INSTALL_DIR}/.env"
+    chmod 0640 "${INSTALL_DIR}/.env"
 
     # 将 root helper 直接内置在本安装脚本中，不再依赖 create-service-user.sh。
     install -d -o root -g root -m 0755 "$(dirname "${PRIV_HELPER}")"
@@ -1410,9 +1423,7 @@ diagnose_certs() {
 }
 
 fix_certs_pipeline() {
-    log_info "执行证书链路修复（含代码部署 + helper 重写）..."
-    # 关键：网页跑的是 /opt/openvpn-admin，不是源码目录；不部署会一直用旧逻辑
-    deploy_project || true
+    log_info "修复已安装版本的证书权限和服务单元；完整升级请使用 --repair"
     setup_service_user || true
     repair_service_unit || true
     if ! fix_cert_permissions; then
@@ -1730,7 +1741,6 @@ main() {
         fi
         deploy_project
         deploy_cli_tools
-        install_python_deps
         setup_openvpn_config
         setup_blacklist_base
         setup_app_config
@@ -1750,7 +1760,6 @@ main() {
     install_system_deps
     deploy_project
     deploy_cli_tools
-    install_python_deps
     setup_openvpn
     setup_openvpn_config
     setup_blacklist_base

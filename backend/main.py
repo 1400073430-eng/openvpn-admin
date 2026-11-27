@@ -14,7 +14,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import config
@@ -24,6 +24,7 @@ from .database import DatabaseError, init_database
 from .routers import audit, auth, clients, connections, dashboard, dns, easyrsa_sync, settings
 from .services.connection_tracker import tracker
 from .services import vpn_access
+from .services.frontend_render import render as render_frontend
 from .services.request_limits import RequestBodyLimitMiddleware
 from .security import is_allowed_page
 
@@ -102,6 +103,7 @@ async def security_headers(request: Request, call_next):
     if not vpn_access.allowed(peer, request.url.path):
         return JSONResponse(status_code=403, content={"detail": "管理平台仅允许通过 VPN 访问，请先连接 VPN，并使用服务器 VPN 内网地址"}, headers={"Cache-Control": "no-store"})
     response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
@@ -178,12 +180,13 @@ if safe_exists(FRONTEND_DIR):
     # 挂载静态资源
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
+    @app.get("/index.html", include_in_schema=False)
     @app.get("/")
     async def index():
         """首页 → 登录页。"""
         index_file = FRONTEND_DIR / "index.html"
         if safe_exists(index_file):
-            return FileResponse(str(index_file))
+            return HTMLResponse(render_frontend(index_file, FRONTEND_DIR))
         return JSONResponse(
             status_code=404,
             content={"code": 404, "message": "前端文件未找到", "data": None},
@@ -202,7 +205,7 @@ if safe_exists(FRONTEND_DIR):
             return JSONResponse(status_code=404, content={"code": 404, "message": "页面不存在", "data": None})
         page_file = FRONTEND_DIR / "pages" / page_name
         if safe_exists(page_file) and safe_is_file(page_file):
-            return FileResponse(str(page_file))
+            return HTMLResponse(render_frontend(page_file, FRONTEND_DIR))
         return JSONResponse(status_code=404, content={"code": 404, "message": "页面不存在", "data": None})
 
 
