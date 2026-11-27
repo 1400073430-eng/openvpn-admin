@@ -97,16 +97,15 @@
   // ========== 加载列表 ==========
   function loadList() {
     var tbody = document.getElementById("dns-tbody");
-    tbody.innerHTML = '<tr><td colspan="5" class="text-center text-secondary">加载中...</td></tr>';
+    ListView.loading(tbody, 5);
 
-    var url = "/api/dns?page=" + currentPage + "&page_size=" + pageSize;
-    if (keyword) url += "&keyword=" + encodeURIComponent(keyword);
+    var url = ListView.url("/api/dns", currentPage, pageSize, keyword);
 
     Api.get(url).then(function (resp) {
       var d = resp.data || {};
       var list = d.list || [];
       if (!list.length) {
-        tbody.innerHTML = '<tr><td colspan="5"><div class="empty-state"><div class="empty-icon">🌐</div><div class="empty-text">暂无黑名单域名</div></div></td></tr>';
+        ListView.empty(tbody, 5, "🌐", "暂无黑名单域名");
       } else {
         var html = "";
         list.forEach(function (item) {
@@ -139,7 +138,7 @@
         }
       });
     }).catch(function (err) {
-      tbody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">' + escHtml(err.message || "加载失败") + "</td></tr>";
+      ListView.error(tbody, 5, err);
     });
   }
 

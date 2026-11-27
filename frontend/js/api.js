@@ -290,6 +290,25 @@
     }
   };
 
+  // ==================== 列表页通用状态 ====================
+  window.ListView = {
+    url: function (path, page, pageSize, keyword) {
+      var url = path + "?page=" + page + "&page_size=" + pageSize;
+      return keyword ? url + "&keyword=" + encodeURIComponent(keyword) : url;
+    },
+    loading: function (tbody, columns) {
+      tbody.innerHTML = '<tr><td colspan="' + columns + '" class="text-center text-secondary">加载中...</td></tr>';
+    },
+    empty: function (tbody, columns, icon, message) {
+      tbody.innerHTML = '<tr><td colspan="' + columns + '"><div class="empty-state"><div class="empty-icon">' +
+        escHtml(icon) + '</div><div class="empty-text">' + escHtml(message) + '</div></div></td></tr>';
+    },
+    error: function (tbody, columns, err) {
+      tbody.innerHTML = '<tr><td colspan="' + columns + '" class="text-center text-danger">' +
+        escHtml((err && err.message) || "加载失败") + '</td></tr>';
+    }
+  };
+
   // ==================== 分页渲染 ====================
   window.Pager = {
     /**
