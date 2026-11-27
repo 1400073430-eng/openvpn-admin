@@ -37,5 +37,22 @@ class InstallConfigTests(unittest.TestCase):
         self.assertIn('status /custom/status.log 15', result)
 
 
+    def test_repair_preserves_existing_security_settings(self):
+        source = (ROOT / 'scripts/install.sh').read_text()
+        start = source.index('    # Keep configured transport and access controls')
+        end = source.index('    if [[ "$preserve_env" -eq 1 ]]; then', start)
+        fragment = source[start:end]
+        with tempfile.TemporaryDirectory() as temp:
+            env = Path(temp) / '.env'
+            env.write_text('OVPM_HTTPS_ENABLED=1\nOVPM_HTTPS_PORT=8443\nOVPM_COOKIE_SECURE=1\nOVPM_ADMIN_VPN_CIDRS=10.9.0.0/24\nOVPM_SSL_CERT=/custom/cert.pem\n')
+            subprocess.run(['bash', '-c', 'INSTALL_DIR="$1"; repair(){\n' + fragment + '\n}; repair', 'bash', temp], check=True, capture_output=True)
+            values = dict(line.split('=', 1) for line in env.read_text().splitlines() if '=' in line and not line.startswith('#'))
+            self.assertEqual(values['OVPM_HTTPS_ENABLED'], '1')
+            self.assertEqual(values['OVPM_HTTPS_PORT'], '8443')
+            self.assertEqual(values['OVPM_COOKIE_SECURE'], '1')
+            self.assertEqual(values['OVPM_ADMIN_VPN_CIDRS'], '10.9.0.0/24')
+            self.assertEqual(values['OVPM_SSL_CERT'], '/custom/cert.pem')
+
+
 if __name__ == '__main__':
     unittest.main()

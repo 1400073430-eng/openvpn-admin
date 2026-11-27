@@ -24,6 +24,7 @@ from .database import DatabaseError, init_database
 from .routers import audit, auth, clients, connections, dashboard, dns, easyrsa_sync, settings
 from .services.connection_tracker import tracker
 from .services import vpn_access
+from .services.request_limits import RequestBodyLimitMiddleware
 from .security import is_allowed_page
 
 # ==================== 日志配置 ====================
@@ -90,6 +91,9 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+
+app.add_middleware(RequestBodyLimitMiddleware)
 
 
 @app.middleware("http")

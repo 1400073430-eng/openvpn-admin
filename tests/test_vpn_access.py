@@ -42,3 +42,9 @@ class VpnAccessTests(unittest.TestCase):
             with patch.dict('os.environ', {'OVPM_ADMIN_VPN_CIDRS': '0.0.0.0/0'}):
                 with self.assertRaises(ValueError):
                     vpn_access.load_networks()
+
+    def test_overbroad_and_reserved_networks_rejected(self):
+        for network in ('0.0.0.0/1', '10.0.0.0/8', '::/1', '::ffff:0:0/96', 'fe80::/64'):
+            with self.subTest(network=network), patch.dict('os.environ', {'OVPM_ADMIN_VPN_CIDRS': network}):
+                with self.assertRaises(ValueError):
+                    vpn_access.load_networks()

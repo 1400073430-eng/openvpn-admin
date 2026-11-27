@@ -42,11 +42,13 @@ def log_action(username: str, action: str, detail: str = "", ip: str = "") -> No
     写库失败不阻断业务，仅记本地日志。
     """
     try:
-        # 清洗
-        username = (username or "unknown")[:32]
-        action = (action or "unknown")[:64]
-        detail = (detail or "")[:500]
-        ip = (ip or "")[:64]
+        # Prevent forged multiline entries in both database and file output.
+        def clean(value, limit):
+            return "".join(char if char.isprintable() else " " for char in str(value))[:limit]
+        username = clean(username or "unknown", 32)
+        action = clean(action or "unknown", 64)
+        detail = clean(detail or "", 500)
+        ip = clean(ip or "", 64)
 
         cleanup_records()
         with get_db() as conn:

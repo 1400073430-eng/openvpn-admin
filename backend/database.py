@@ -93,6 +93,7 @@ def init_database() -> None:
     try:
         with get_db() as conn:
             conn.executescript(SCHEMA_SQL)
+            conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 "SELECT id FROM admins LIMIT 1",
             ).fetchone()

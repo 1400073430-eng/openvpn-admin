@@ -668,6 +668,18 @@ setup_app_config() {
         [[ -n "$pr" ]] && VPN_PROTO="$pr"
     fi
 
+    # Keep configured transport and access controls without sourcing .env as shell code.
+    local -A retained_security=()
+    local retained_key retained_value
+    if [[ -f "${INSTALL_DIR}/.env" ]]; then
+        while IFS='=' read -r retained_key retained_value; do
+            case "$retained_key" in
+                OVPM_HTTPS_ENABLED|OVPM_HTTPS_PORT|OVPM_SSL_CERT|OVPM_SSL_KEY|OVPM_COOKIE_SECURE|OVPM_COOKIE_SAMESITE|OVPM_AUTH_COOKIE|OVPM_JWT_EXPIRE|OVPM_ALLOWED_ORIGINS|OVPM_TRUSTED_PROXY_IPS)
+                    retained_security["$retained_key"]="${retained_value%$'\r'}"
+                    ;;
+            esac
+        done < "${INSTALL_DIR}/.env"
+    fi
     local admin_vpn_cidrs=""
     if [[ -f "${INSTALL_DIR}/.env" ]]; then
         admin_vpn_cidrs=$(sed -n 's/^OVPM_ADMIN_VPN_CIDRS=//p' "${INSTALL_DIR}/.env" | head -1)
@@ -709,6 +721,10 @@ OVPM_SSL_CERT=/etc/openvpn/web/ssl/server.crt
 OVPM_SSL_KEY=/etc/openvpn/web/ssl/server.key
 EOF
 
+    for retained_key in "${!retained_security[@]}"; do
+        sed -i "/^${retained_key}=/d" "${INSTALL_DIR}/.env"
+        printf '%s=%s\n' "$retained_key" "${retained_security[$retained_key]}" >> "${INSTALL_DIR}/.env"
+    done
     chmod 600 "${INSTALL_DIR}/.env"
     if [[ "$preserve_env" -eq 1 ]]; then
         log_success "应用配置已更新（保留原有 JWT 与管理员口令）"
