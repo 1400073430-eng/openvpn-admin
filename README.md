@@ -95,7 +95,7 @@ python3 -m pip install -r requirements-dev.txt
 bash scripts/test.sh
 ```
 
-自动测试使用临时数据库，并模拟 DNS、特权命令和网络迁移，不修改真实服务器网络。[测试说明](docs/TESTING.md) 区分本地自动测试与必须在真实服务器执行的验收。GitHub Actions 配置可在源码发布到有权限的仓库后运行，尚不能据此声称远端 CI 已通过。
+自动测试使用临时数据库，并模拟 DNS、特权命令和网络迁移，不修改真实服务器网络。[测试说明](docs/TESTING.md) 区分自动测试与必须在真实服务器执行的验收。GitHub Actions 配置位于 `.github/workflows/test.yml`；实际运行结果以对应提交的 Actions 状态为准。
 
 ## 卸载
 
@@ -112,9 +112,12 @@ sudo bash scripts/uninstall.sh
 | `backend/` | API、认证、数据库、证书、会话跟踪和网络逻辑 |
 | `frontend/` | 网页与静态资源 |
 | `scripts/install.sh` | 安装、升级、修复和诊断 |
+| `scripts/deploy_release.py` / `preflight_release.py` | 升级时的源码替换与预检，供安装器调用 |
+| `scripts/preflight-real-server.sh` / `verify-blacklist.sh` / `cert_pipeline_diag.sh` | 真实服务器上的诊断入口 |
 | `scripts/privileged/` | root helper、队列 worker、黑名单同步器 |
+| `scripts/cli/` | SSH 下可用的客户端证书管理 CLI |
 | `scripts/vendor/` | 保留来源信息的内置 Nyr 安装脚本 |
-| `tests/` | 自动测试与服务器验收脚本 |
+| `tests/` | 自动回归、安全检查和需人工执行的服务器验收脚本 |
 | `docs/` | 运维、IPv6 与测试说明 |
 | `CHANGELOG.md` | 唯一更新记录 |
 | `DESIGN.md` | 当前前端视觉规范 |
@@ -122,3 +125,5 @@ sudo bash scripts/uninstall.sh
 仓库与发布包不包含 `.env`、运行数据库、日志、私钥或生成的 `.ovpn` 配置。
 
 内置安装脚本来自 [Nyr/openvpn-install](https://github.com/Nyr/openvpn-install)，其源码保留原作者声明，许可证见 [scripts/vendor/LICENSE](scripts/vendor/LICENSE)。
+
+`scripts/upgrade-ipv6-ui.sh` 是已停用的旧升级入口，执行时只提示改用完整升级；`scripts/verify-v4.2-blacklist.sh` 是旧诊断命令的兼容转发入口。它们不参与新版本部署，保留是为了让旧操作命令给出明确结果。
