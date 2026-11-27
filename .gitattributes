@@ -6,3 +6,5 @@
 *.css text eol=lf
 *.md text eol=lf
 *.txt text eol=lf
+scripts/privileged/ovpn-admin-job-worker text eol=lf
+scripts/privileged/ovpn-admin-blacklist-sync text eol=lf

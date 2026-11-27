@@ -812,6 +812,7 @@ EOF
     chmod 1730 /var/spool/ovpn-admin
 
     install -m 0755 "${SCRIPT_DIR}/privileged/ovpn-admin-job-worker" /usr/local/sbin/ovpn-admin-job-worker
+    sed -i 's/\r$//' /usr/local/sbin/ovpn-admin-job-worker
     chown root:root /usr/local/sbin/ovpn-admin-job-worker
     chmod 0755 /usr/local/sbin/ovpn-admin-job-worker
 
@@ -886,6 +887,7 @@ setup_blacklist_runtime() {
     log_info "部署 nftables 黑名单同步器..."
     install -d -o root -g root -m 0755 /usr/local/sbin
     install -m 0755 "${SCRIPT_DIR}/privileged/ovpn-admin-blacklist-sync" /usr/local/sbin/ovpn-admin-blacklist-sync
+    sed -i 's/\r$//' /usr/local/sbin/ovpn-admin-blacklist-sync
     chown root:root /usr/local/sbin/ovpn-admin-blacklist-sync
     chmod 0755 /usr/local/sbin/ovpn-admin-blacklist-sync
     cat > /etc/systemd/system/openvpn-admin-blacklist.service <<'UNIT'
