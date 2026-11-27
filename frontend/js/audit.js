@@ -32,16 +32,15 @@
 
   function loadList() {
     var tbody = document.getElementById("audit-tbody");
-    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-secondary">加载中...</td></tr>';
+    ListView.loading(tbody, 6);
 
-    var url = "/api/audit?page=" + currentPage + "&page_size=" + pageSize;
-    if (keyword) url += "&keyword=" + encodeURIComponent(keyword);
+    var url = ListView.url("/api/audit", currentPage, pageSize, keyword);
 
     Api.get(url).then(function (resp) {
       var d = resp.data || {};
       var list = d.list || [];
       if (!list.length) {
-        tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state"><div class="empty-icon">📋</div><div class="empty-text">暂无日志</div></div></td></tr>';
+        ListView.empty(tbody, 6, "📋", "暂无日志");
       } else {
         var html = "";
         list.forEach(function (item) {
@@ -68,7 +67,7 @@
         }
       });
     }).catch(function (err) {
-      tbody.innerHTML = '<tr><td colspan="6" class="text-center text-danger">' + escHtml(err.message || "加载失败") + "</td></tr>";
+      ListView.error(tbody, 6, err);
     });
   }
 
