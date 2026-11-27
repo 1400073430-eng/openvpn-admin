@@ -19,6 +19,10 @@
       '<button class="btn btn-secondary btn-sm" id="btn-selftest">运行自测</button></div>' +
       '<div class="panel-body" id="services-panel">加载中...</div>' +
     '</div>' +
+    '<div class="panel"><div class="panel-header"><h2 class="panel-title">节点出口检测</h2></div>' +
+    '<div class="panel-body"><p>手动向 ipify.org 和 ipwho.is 查询服务器出口及归属；查询服务会收到出口 IP。结果缓存 5 分钟。</p>' +
+    '<button type="button" class="btn btn-secondary mt-2" id="btn-node-check">检测节点</button>' +
+    '<div id="node-check-result" class="mt-2">尚未检测。此功能不检测黑名单、滥用历史或客户端泄漏。</div></div></div>' +
     // 网络配置
     '<div class="panel">' +
       '<div class="panel-header"><h2 class="panel-title">网络配置</h2></div>' +
@@ -328,6 +332,25 @@
       setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
       Toast.success("脚本已下载；尚未应用网络配置，请在 SSH 中预检后执行。");
     }).catch(function (err) { Toast.error(err.message || "下载失败"); })
+      .then(function () { btn.disabled = false; });
+  });
+  document.getElementById("btn-node-check").addEventListener("click", function () {
+    var btn = this;
+    var output = document.getElementById("node-check-result");
+    btn.disabled = true;
+    output.textContent = "检测中，请稍候…";
+    Api.post("/api/settings/node-check", {}).then(function (resp) {
+      var data = resp.data;
+      var html = "<p>检测时间：" + escHtml(data.checked_at) + (data.cached ? "（缓存）" : "") + "</p>";
+      (data.results || []).forEach(function (r) {
+        html += "<p><strong>IPv" + escHtml(r.version) + "</strong>：" + escHtml(r.ip || r.note || "查询失败") + "</p>";
+        if (r.metadata_status === "ok") {
+          html += "<p>地区：" + escHtml([r.country, r.region, r.city].join(" / ")) +
+            "；ASN：" + escHtml(r.asn) + "；运营商：" + escHtml(r.isp) + "；组织：" + escHtml(r.organization) + "</p>";
+        } else if (r.ip) { html += "<p>归属信息查询失败，未判定为安全或危险。</p>"; }
+      });
+      output.innerHTML = html + "<p>" + escHtml(data.note) + "</p>";
+    }).catch(function (err) { output.textContent = err.message || "检测失败"; })
       .then(function () { btn.disabled = false; });
   });
   loadSettings();

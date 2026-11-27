@@ -152,3 +152,10 @@ def download_ipv6_script(request: Request, username: str = Depends(get_current_u
     return {"code": 200, "message": "脚本仅下载，尚未应用", "data": {
         "filename": "ovpn-dualstack-upgrade.py",
         "script": Path(ipv6_upgrade.__file__).read_text(encoding="utf-8")}}
+
+
+@router.post("/node-check")
+def check_node(username: str = Depends(get_current_user)):
+    """Manually query fixed third-party services; no network mutation."""
+    from ..services.node_check import check
+    return {"code": 200, "message": "ok", "data": check()}
