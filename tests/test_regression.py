@@ -38,6 +38,15 @@ class PlatformRegression(unittest.TestCase):
         for router in (auth.router, dns.router, settings.router):
             app.include_router(router)
         self.client = TestClient(app)
+        original_post = self.client.post
+        def post_with_captcha(url, **kwargs):
+            if url == '/api/auth/login':
+                from backend.services import login_guard
+                with patch.object(login_guard.secrets, 'choice', return_value='A'):
+                    challenge = self.client.get('/api/auth/captcha').json()
+                kwargs['json'] = dict(kwargs['json'], captcha_id=challenge['id'], captcha_answer='AAAAA')
+            return original_post(url, **kwargs)
+        self.client.post = post_with_captcha
         self.addCleanup(self.client.close)
 
     def login(self, password='Test-only-password-123'):
@@ -193,7 +202,7 @@ class MainRouteSmoke(unittest.TestCase):
         self.assertEqual(actual, expected)
         for entry in actual:
             method, path = entry.split(' ', 1)
-            if path in ('/api/health', '/api/auth/login'):
+            if path in ('/api/health', '/api/auth/login', '/api/auth/captcha'):
                 continue
             path = path.replace('{name}', 'test-client').replace('{client_id}', '1').replace('{domain_id}', '1')
             response = client.request(method, path, json={} if method in ('POST', 'PUT') else None)

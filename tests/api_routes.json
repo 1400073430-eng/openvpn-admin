@@ -2,6 +2,7 @@
   "DELETE /api/clients/{name}",
   "DELETE /api/dns/{domain_id}",
   "GET /api/audit",
+  "GET /api/auth/captcha",
   "GET /api/auth/me",
   "GET /api/clients",
   "GET /api/clients/{name}/ovpn",
