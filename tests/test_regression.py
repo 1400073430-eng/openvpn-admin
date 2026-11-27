@@ -152,6 +152,15 @@ class PlatformRegression(unittest.TestCase):
             self.assertEqual(conn.execute("SELECT count(*) FROM auth_sessions").fetchone()[0], 0)
             self.assertEqual(conn.execute("SELECT count(*) FROM audit_logs WHERE action = 'old'").fetchone()[0], 0)
 
+    def test_audit_control_characters_cannot_forge_log_lines(self):
+        from backend.services.audit_service import log_action
+        log_action('admin', 'test', 'detail\nFORGED\rline\x00')
+        with database.get_db() as conn:
+            detail = conn.execute("SELECT detail FROM audit_logs WHERE action = 'test'").fetchone()[0]
+        self.assertNotIn('\n', detail)
+        self.assertNotIn('\r', detail)
+        self.assertNotIn('\x00', detail)
+
     def test_settings_write_and_read(self):
         self.login()
         response = self.client.put('/api/settings', json={'server_ip': '192.0.2.10', 'vpn_port': 1195})
