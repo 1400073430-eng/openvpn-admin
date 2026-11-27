@@ -76,6 +76,34 @@ class PlatformRegression(unittest.TestCase):
         self.client.cookies.clear()
         self.login('Changed-test-password-456')
 
+    def test_username_change_requires_password_and_revokes_old_sessions(self):
+        self.login()
+        old_token = self.client.cookies.get(config.AUTH_COOKIE_NAME)
+        self.assertEqual(self.client.post('/api/auth/change-username', json={
+            'new_username': 'new_admin', 'current_password': 'incorrect-password'
+        }).status_code, 400)
+        self.assertEqual(self.client.get('/api/auth/me').status_code, 200)
+        self.assertEqual(self.client.post('/api/auth/change-username', json={
+            'new_username': 'bad-name', 'current_password': 'Test-only-password-123'
+        }).status_code, 422)
+        response = self.client.post('/api/auth/change-username', json={
+            'new_username': 'new_admin', 'current_password': 'Test-only-password-123'
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        database.init_database()  # 模拟服务重启，不能重新创建默认管理员
+        with database.get_db() as conn:
+            admins = [row['username'] for row in conn.execute('SELECT username FROM admins')]
+        self.assertEqual(admins, ['new_admin'])
+        self.client.cookies.set(config.AUTH_COOKIE_NAME, old_token)
+        self.assertEqual(self.client.get('/api/auth/me').status_code, 401)
+        self.client.cookies.clear()
+        self.assertEqual(self.client.post('/api/auth/login', json={
+            'username': 'admin', 'password': 'Test-only-password-123'
+        }).status_code, 401)
+        self.assertEqual(self.client.post('/api/auth/login', json={
+            'username': 'new_admin', 'password': 'Test-only-password-123'
+        }).status_code, 200)
+
     def test_settings_write_and_read(self):
         self.login()
         response = self.client.put('/api/settings', json={'server_ip': '192.0.2.10', 'vpn_port': 1195})

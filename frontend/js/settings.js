@@ -63,6 +63,18 @@
       '<div class="panel-header"><h2 class="panel-title">HTTPS 配置</h2></div>' +
       '<div class="panel-body" id="https-panel">加载中...</div>' +
     '</div>' +
+    // 修改用户名
+    '<div class="panel">' +
+      '<div class="panel-header"><h2 class="panel-title">修改管理员用户名</h2></div>' +
+      '<div class="panel-body"><form id="form-username">' +
+        '<div class="form-group"><label class="form-label">新用户名 *</label>' +
+          '<input class="form-input" id="admin-new-username" autocomplete="username" maxlength="32" placeholder="3-32 位字母、数字或下划线"><div class="form-error"></div></div>' +
+        '<div class="form-group"><label class="form-label">当前密码 *</label>' +
+          '<input class="form-input" type="password" id="admin-current-password" autocomplete="current-password" maxlength="128"><div class="form-error"></div></div>' +
+        '<button type="button" class="btn btn-primary" id="btn-save-username">修改用户名</button>' +
+        '<p class="mt-2 text-secondary">修改后所有管理会话将退出，请用新用户名和原密码重新登录。</p>' +
+      '</form></div>' +
+    '</div>' +
     // 修改密码
     '<div class="panel">' +
       '<div class="panel-header"><h2 class="panel-title">修改管理员密码</h2></div>' +
@@ -173,6 +185,31 @@
     }).then(function () {
       btn.disabled = false;
     });
+  });
+
+  // ========== 修改用户名 ==========
+  document.getElementById("btn-save-username").addEventListener("click", function () {
+    var userEl = document.getElementById("admin-new-username");
+    var pwdEl = document.getElementById("admin-current-password");
+    Validator.clearAllErrors(document.getElementById("form-username"));
+    var newUsername = userEl.value.trim();
+    if (!/^[a-zA-Z0-9_]{3,32}$/.test(newUsername)) {
+      Validator.showError(userEl, "用户名需为 3-32 位字母、数字或下划线");
+      return;
+    }
+    if (!pwdEl.value) {
+      Validator.showError(pwdEl, "请输入当前密码");
+      return;
+    }
+    var btn = this;
+    btn.disabled = true;
+    Api.post("/api/auth/change-username", {new_username: newUsername, current_password: pwdEl.value})
+      .then(function () {
+        Auth.clear();
+        window.location.href = "/index.html";
+      }).catch(function (err) {
+        Toast.error(err.message || "修改用户名失败");
+      }).then(function () { btn.disabled = false; });
   });
 
   // ========== 修改密码 ==========

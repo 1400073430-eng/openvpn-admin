@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from .. import config
 from ..auth import create_access_token, decode_token_claims, get_client_ip, get_current_user
 from ..database import DatabaseError, get_db
-from ..models import ChangePasswordRequest, LoginRequest, LoginResponse
+from ..models import ChangePasswordRequest, ChangeUsernameRequest, LoginRequest, LoginResponse
 from ..security import (
     clear_login_failures,
     hash_password,
@@ -121,6 +121,37 @@ async def logout(request: Request, response: Response, username: str = Depends(g
 @router.get("/me")
 async def get_me(username: str = Depends(get_current_user)):
     return {"code": 200, "message": "ok", "data": {"username": username}}
+
+
+@router.post("/change-username")
+async def change_username(req: ChangeUsernameRequest, request: Request, response: Response, username: str = Depends(get_current_user)):
+    """Rename the current admin and revoke all existing sessions atomically."""
+    try:
+        with get_db() as conn:
+            row = conn.execute("SELECT id, password_hash FROM admins WHERE username = ?", (username,)).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="用户不存在")
+            if not verify_password(req.current_password, row["password_hash"]):
+                raise HTTPException(status_code=400, detail="当前密码错误")
+            if req.new_username == username:
+                raise HTTPException(status_code=400, detail="新用户名不能与当前用户名相同")
+            if conn.execute("SELECT 1 FROM admins WHERE username = ?", (req.new_username,)).fetchone():
+                raise HTTPException(status_code=409, detail="用户名已存在")
+            conn.execute("UPDATE admins SET username = ?, updated_at = datetime('now') WHERE id = ?", (req.new_username, row["id"]))
+            conn.execute("UPDATE auth_sessions SET revoked_at = datetime('now') WHERE username = ? AND revoked_at IS NULL", (username,))
+
+        response.delete_cookie(config.AUTH_COOKIE_NAME, path=config.AUTH_COOKIE_PATH)
+        log_action(req.new_username, "修改管理员用户名", "原用户名=" + username + "；全部旧会话已吊销", get_client_ip(request))
+        return {"code": 200, "message": "用户名修改成功，请重新登录", "data": {"username": req.new_username}}
+    except HTTPException:
+        raise
+    except DatabaseError as exc:
+        if "约束" in str(exc):
+            raise HTTPException(status_code=409, detail="用户名已存在")
+        raise HTTPException(status_code=500, detail="服务暂时不可用")
+    except Exception:
+        logger.exception("修改用户名异常")
+        raise HTTPException(status_code=500, detail="修改用户名失败")
 
 
 @router.post("/change-password")

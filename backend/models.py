@@ -44,6 +44,18 @@ class ChangePasswordRequest(BaseModel):
         return v
 
 
+class ChangeUsernameRequest(BaseModel):
+    new_username: str = Field(..., min_length=3, max_length=32)
+    current_password: str = Field(..., min_length=8, max_length=128)
+
+    @field_validator("new_username")
+    @classmethod
+    def check_new_username(cls, v: str) -> str:
+        if not security.validate_username(v):
+            raise ValueError("用户名格式不正确（3-32位字母数字下划线）")
+        return v
+
+
 # ==================== VPN 客户端 ====================
 
 class ClientCreateRequest(BaseModel):

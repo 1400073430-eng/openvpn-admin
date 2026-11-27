@@ -88,14 +88,13 @@ def init_database() -> None:
     可重复调用（幂等）。
 
     注意：Web 服务启动与安装诊断可能并发执行；
-    必须用 INSERT OR IGNORE / 按用户名存在性判断，避免 UNIQUE 冲突。
+    只在管理员表为空时创建初始账号；已改名的管理员不得触发默认账号重建。
     """
     try:
         with get_db() as conn:
             conn.executescript(SCHEMA_SQL)
             existing = conn.execute(
-                "SELECT id FROM admins WHERE username = ?",
-                (config.DEFAULT_ADMIN_USER,),
+                "SELECT id FROM admins LIMIT 1",
             ).fetchone()
             if existing:
                 return
