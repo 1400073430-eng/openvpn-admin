@@ -22,6 +22,7 @@ from .auth import get_current_user
 from .database import DatabaseError, init_database
 from .routers import audit, auth, clients, connections, dashboard, dns, easyrsa_sync, settings
 from .services.connection_tracker import tracker
+from .services import vpn_access
 from .security import is_allowed_page
 
 # ==================== 日志配置 ====================
@@ -43,6 +44,10 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 50)
     logger.info("OpenVPN 管理平台启动中...")
     logger.info("=" * 50)
+
+    vpn_access.NETWORKS = vpn_access.load_networks()
+    if not vpn_access.NETWORKS:
+        raise RuntimeError("无法确定管理访问 VPN 网段，请设置 OVPM_ADMIN_VPN_CIDRS，例如 10.8.0.0/24")
 
     # 启动前安全检查：生产环境必须显式提供随机 JWT 密钥和管理员密码
     if len(config.JWT_SECRET) < 32:
@@ -88,6 +93,9 @@ app.add_middleware(
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
+    peer = request.client.host if request.client else ""
+    if not vpn_access.allowed(peer, request.url.path):
+        return JSONResponse(status_code=403, content={"detail": "管理平台仅允许通过 VPN 访问，请先连接 VPN，并使用服务器 VPN 内网地址"}, headers={"Cache-Control": "no-store"})
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
@@ -217,6 +225,7 @@ if __name__ == "__main__":
         logger.info("检测到 SSL 证书，以 HTTPS 模式启动")
         uvicorn.run(
             "backend.main:app",
+            proxy_headers=False,
             host=config.WEB_HOST,
             port=config.HTTPS_PORT,
             **ssl_args,
@@ -225,6 +234,7 @@ if __name__ == "__main__":
         logger.info("以 HTTP 模式启动（可挂载证书切换 HTTPS）")
         uvicorn.run(
             "backend.main:app",
+            proxy_headers=False,
             host=config.WEB_HOST,
             port=config.WEB_PORT,
         )

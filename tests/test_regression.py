@@ -191,7 +191,11 @@ class PlatformRegression(unittest.TestCase):
 class MainRouteSmoke(unittest.TestCase):
     def test_all_existing_business_routes_remain_protected(self):
         from backend.main import app
-        client = TestClient(app)  # No context manager: don't start the real tracker.
+        from backend.services import vpn_access
+        import ipaddress
+        self.addCleanup(patch.stopall)
+        patch.object(vpn_access, 'NETWORKS', (ipaddress.ip_network('10.8.0.0/24'),)).start()
+        client = TestClient(app, client=('10.8.0.2', 12345))  # No context manager: don't start the real tracker.
         self.addCleanup(client.close)
         checked = 0
         import json
