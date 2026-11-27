@@ -16,6 +16,8 @@ from . import security
 # ==================== 认证 ====================
 
 class LoginRequest(BaseModel):
+    captcha_id: str = Field(..., min_length=20, max_length=64)
+    captcha_answer: str = Field(..., min_length=5, max_length=5)
     username: str = Field(..., min_length=3, max_length=32)
     password: str = Field(..., min_length=8, max_length=128)
 
@@ -41,6 +43,18 @@ class ChangePasswordRequest(BaseModel):
     def check_new_password(cls, v: str) -> str:
         if not security.is_valid_password(v):
             raise ValueError("新密码不符合安全要求（至少8位，无控制字符）")
+        return v
+
+
+class ChangeUsernameRequest(BaseModel):
+    new_username: str = Field(..., min_length=3, max_length=32)
+    current_password: str = Field(..., min_length=8, max_length=128)
+
+    @field_validator("new_username")
+    @classmethod
+    def check_new_username(cls, v: str) -> str:
+        if not security.validate_username(v):
+            raise ValueError("用户名格式不正确（3-32位字母数字下划线）")
         return v
 
 

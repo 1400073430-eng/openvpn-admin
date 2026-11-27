@@ -17,7 +17,7 @@
 # 用法：
 #   sudo bash install.sh              # 全新安装 / 覆盖升级
 #   sudo bash install.sh --repair     # 仅修复：清旧入口、重部署、重写 systemd、校验登录/证书
-#   sudo bash install.sh --diagnose   # 仅诊断：数据库、登录 API、证书链路（不改代码）
+#   sudo bash install.sh --diagnose   # 诊断数据库、访问限制与证书；会修复数据权限及初始化缺失表
 #   sudo bash install.sh --fix-certs  # 仅修复证书链路（systemd 提权 + PKI 权限）
 # ============================================================
 
@@ -49,6 +49,8 @@ VPN_PORT=1194
 
 # 运行模式：install | repair | diagnose | fix-certs
 RUN_MODE="install"
+CHECK_FAILURES=0
+INITIAL_CREDENTIALS_REUSED=0
 
 # 脚本自身目录（用于定位内嵌 Nyr 安装器）
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -65,6 +67,7 @@ log_success() {
 
 # 失败提示（带原因）
 log_fail() {
+    CHECK_FAILURES=$((CHECK_FAILURES + 1))
     echo -e "${RED}【失败】${NC} $1"
     echo -e "${RED}       原因：${NC} $2"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [失败] $1 | 原因: $2" >> "$LOG_FILE"
@@ -99,7 +102,7 @@ init_install() {
                 echo "用法: sudo bash install.sh [--install|--repair|--diagnose|--fix-certs]"
                 echo "  --install    全新安装 / 覆盖升级（默认）"
                 echo "  --repair     修复启动/登录/证书（清旧入口、重部署、重写 systemd、修 PKI 权限）"
-                echo "  --diagnose   仅诊断登录、数据库、证书链路（不改动代码）"
+                echo "  --diagnose   诊断登录、数据库、证书链路（会修复数据权限并初始化缺失表，不是只读检查）"
                 echo "  --fix-certs  仅修复证书链路（NoNewPrivileges / PKI 权限 / root 任务队列）"
                 exit 0
                 ;;
@@ -321,22 +324,33 @@ deploy_project() {
         exit 1
     fi
 
-    # 复制后端、前端、配置
-    # 清理早期版本的顶层入口，避免 server.py/storage.py 与当前 backend 包混用。
-    # 这是 ModuleNotFoundError: No module named 'security' 的根因。
-    if [[ -f "${INSTALL_DIR}/server.py" || -f "${INSTALL_DIR}/storage.py" || -f "${INSTALL_DIR}/security.py" ]]; then
-        log_info "检测到旧版顶层入口（server.py/storage.py/security.py），清理中..."
+    python3 "${SCRIPT_DIR}/deploy_release.py" --source "$script_dir" --target "$INSTALL_DIR" --check || {
+        log_fail "部署源检查" "源码不完整或目录不安全，未覆盖旧代码"; return 1;
+    }
+    # Build dependencies in a separate permanent path before stopping the old app.
+    install_python_deps
+    # Never copy over modules while the old Web process is handling requests.
+    local old_web_active=0
+    if systemctl is-active --quiet "$APP_NAME"; then
+        old_web_active=1
+        systemctl stop "$APP_NAME" >> "$LOG_FILE" 2>&1 || {
+            log_fail "停止旧 Web 服务" "停止失败，拒绝覆盖运行中的代码"; return 1;
+        }
     fi
-    rm -f "${INSTALL_DIR}/server.py" "${INSTALL_DIR}/storage.py" "${INSTALL_DIR}/security.py" 2>/dev/null || true
-    rm -rf "${INSTALL_DIR}/__pycache__" "${INSTALL_DIR}/routers" "${INSTALL_DIR}/services" 2>/dev/null || true
-    cp -r "${script_dir}/backend" "$INSTALL_DIR/"
-    cp -r "${script_dir}/frontend" "$INSTALL_DIR/"
-    cp "${script_dir}/requirements.txt" "$INSTALL_DIR/"
-    cp "${script_dir}/CHANGELOG.md" "$INSTALL_DIR/"
-    [[ -d "${script_dir}/docs" ]] && cp -r "${script_dir}/docs" "$INSTALL_DIR/"
-    [[ -f "${script_dir}/README.md" ]] && cp "${script_dir}/README.md" "$INSTALL_DIR/" 2>/dev/null || true
-
-    log_success "项目文件部署完成（旧入口已清理，backend 包已就位）"
+    local backup_path
+    backup_path=$(python3 "${SCRIPT_DIR}/deploy_release.py" --source "$script_dir" --target "$INSTALL_DIR" --venv "$NEXT_VENV") || {
+        log_fail "代码部署" "替换失败，已尝试恢复本轮移动的代码与环境入口"
+        if [[ "$old_web_active" -eq 1 ]]; then
+            if systemctl start "$APP_NAME" >> "$LOG_FILE" 2>&1; then
+                log_info "已重新启动切换前的 Web 服务，请核对健康状态"
+            else
+                log_fail "旧服务恢复启动" "启动失败，请通过 SSH 检查日志与升级备份"
+            fi
+        fi
+        return 1;
+    }
+    log_success "代码目录精确替换完成，旧模块和字节码不再混入运行目录"
+    log_info "升级备份：${backup_path}（旧代码、旧环境入口、配置及数据库快照；不包含系统配置）"
 }
 
 # ============================================================
@@ -358,24 +372,23 @@ deploy_cli_tools() {
 # 第6步：创建 Python 虚拟环境并安装依赖
 # ============================================================
 install_python_deps() {
-    log_info "创建 Python 虚拟环境..."
-
-    if ! python3 -m venv "${INSTALL_DIR}/venv" >> "$LOG_FILE" 2>&1; then
-        log_fail "虚拟环境创建" "python3 -m venv 失败"
-        exit 1
+    log_info "在独立目录准备新 Python 环境；失败不会修改当前环境或停止旧服务"
+    NEXT_VENV=$(mktemp -d "${INSTALL_DIR}/.venv-release.XXXXXXXX")
+    chmod 0755 "$NEXT_VENV"
+    if ! (
+        umask 022
+        python3 -m venv "$NEXT_VENV" >> "$LOG_FILE" 2>&1 &&
+        "$NEXT_VENV/bin/python" -m pip install -r "${SCRIPT_DIR}/../requirements.txt" >> "$LOG_FILE" 2>&1 &&
+        "$NEXT_VENV/bin/python" -m pip check >> "$LOG_FILE" 2>&1 &&
+        env PYTHONPATH="${SCRIPT_DIR}/.." PYTHONDONTWRITEBYTECODE=1 OVPM_DATA_DIR="$NEXT_VENV/preflight-data" \
+          "$NEXT_VENV/bin/python" "${SCRIPT_DIR}/preflight_release.py" --source "${SCRIPT_DIR}/.." --target "$INSTALL_DIR" --data "$NEXT_VENV/preflight-data" >> "$LOG_FILE" 2>&1
+    ); then
+        rm -rf -- "$NEXT_VENV"
+        log_fail "新环境预检" "依赖或应用导入失败，旧代码与旧环境未覆盖，请查看日志"
+        return 1
     fi
-    log_success "虚拟环境创建: ${INSTALL_DIR}/venv"
-
-    log_info "安装 Python 依赖（FastAPI 等）..."
-    if ! "${INSTALL_DIR}/venv/bin/pip" install --upgrade pip >> "$LOG_FILE" 2>&1; then
-        log_warn "pip 升级失败，继续安装依赖"
-    fi
-
-    if ! "${INSTALL_DIR}/venv/bin/pip" install -r "${INSTALL_DIR}/requirements.txt" >> "$LOG_FILE" 2>&1; then
-        log_fail "Python 依赖安装" "pip install 失败，请检查网络或 requirements.txt"
-        exit 1
-    fi
-    log_success "Python 依赖安装完成"
+    rm -rf -- "$NEXT_VENV/preflight-data"
+    log_success "新环境依赖及应用导入检查通过，代码切换时才激活"
 }
 
 # ============================================================
@@ -584,6 +597,7 @@ setup_app_config() {
         [[ "$old_web_port" =~ ^[0-9]+$ ]] && WEB_PORT="$old_web_port"
         [[ -n "$old_web_host" ]] && WEB_HOST="$old_web_host"
         DEFAULT_ADMIN_USER=${DEFAULT_ADMIN_USER:-admin}
+        INITIAL_CREDENTIALS_REUSED=1
         log_info "检测到已有 .env，保留 JWT 与管理员口令（不重新生成）"
     else
         # 生成随机 JWT 密钥与一次性管理员初始密码（不再使用源码固定密码）
@@ -668,6 +682,22 @@ setup_app_config() {
         [[ -n "$pr" ]] && VPN_PROTO="$pr"
     fi
 
+    # Keep configured transport and access controls without sourcing .env as shell code.
+    local -A retained_security=()
+    local retained_key retained_value
+    if [[ -f "${INSTALL_DIR}/.env" ]]; then
+        while IFS='=' read -r retained_key retained_value; do
+            case "$retained_key" in
+                OVPM_HTTPS_ENABLED|OVPM_HTTPS_PORT|OVPM_SSL_CERT|OVPM_SSL_KEY|OVPM_COOKIE_SECURE|OVPM_COOKIE_SAMESITE|OVPM_AUTH_COOKIE|OVPM_JWT_EXPIRE|OVPM_ALLOWED_ORIGINS|OVPM_TRUSTED_PROXY_IPS)
+                    retained_security["$retained_key"]="${retained_value%$'\r'}"
+                    ;;
+            esac
+        done < "${INSTALL_DIR}/.env"
+    fi
+    local admin_vpn_cidrs=""
+    if [[ -f "${INSTALL_DIR}/.env" ]]; then
+        admin_vpn_cidrs=$(sed -n 's/^OVPM_ADMIN_VPN_CIDRS=//p' "${INSTALL_DIR}/.env" | head -1)
+    fi
     cat > "${INSTALL_DIR}/.env" << EOF
 # OpenVPN 管理平台环境配置（由安装脚本生成，对齐 Nyr/openvpn-install）
 OVPM_JWT_SECRET=${JWT_SECRET}
@@ -676,6 +706,7 @@ OVPM_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD}
 OVPM_SERVER_IP=${SERVER_IP}
 OVPM_WEB_PORT=${WEB_PORT}
 OVPM_WEB_HOST=${WEB_HOST:-0.0.0.0}
+OVPM_ADMIN_VPN_CIDRS=${admin_vpn_cidrs}
 OVPM_HTTPS_ENABLED=0
 OVPM_HTTPS_PORT=443
 OVPM_ALLOWED_ORIGINS=
@@ -704,6 +735,10 @@ OVPM_SSL_CERT=/etc/openvpn/web/ssl/server.crt
 OVPM_SSL_KEY=/etc/openvpn/web/ssl/server.key
 EOF
 
+    for retained_key in "${!retained_security[@]}"; do
+        sed -i "/^${retained_key}=/d" "${INSTALL_DIR}/.env"
+        printf '%s=%s\n' "$retained_key" "${retained_security[$retained_key]}" >> "${INSTALL_DIR}/.env"
+    done
     chmod 600 "${INSTALL_DIR}/.env"
     if [[ "$preserve_env" -eq 1 ]]; then
         log_success "应用配置已更新（保留原有 JWT 与管理员口令）"
@@ -735,9 +770,12 @@ setup_service_user() {
     fi
 
     mkdir -p "${INSTALL_DIR}/data" "${INSTALL_DIR}/logs" /etc/openvpn-admin
-    chown -R "${APP_USER}:${APP_GROUP}" "${INSTALL_DIR}"
+    # Code, virtual environments and root-only upgrade snapshots stay root-owned.
+    chown root:"${APP_GROUP}" "${INSTALL_DIR}"
+    chown -R "${APP_USER}:${APP_GROUP}" "${INSTALL_DIR}/data" "${INSTALL_DIR}/logs"
     chmod 0750 "${INSTALL_DIR}" "${INSTALL_DIR}/data" "${INSTALL_DIR}/logs"
-    chmod 0600 "${INSTALL_DIR}/.env"
+    chown root:"${APP_GROUP}" "${INSTALL_DIR}/.env"
+    chmod 0640 "${INSTALL_DIR}/.env"
 
     # 将 root helper 直接内置在本安装脚本中，不再依赖 create-service-user.sh。
     install -d -o root -g root -m 0755 "$(dirname "${PRIV_HELPER}")"
@@ -1052,28 +1090,30 @@ EOF
 # ============================================================
 # 第12步：配置防火墙
 # ============================================================
+configured_health_url() {
+    PYTHONPATH="${INSTALL_DIR}" "${INSTALL_DIR}/venv/bin/python" -m backend.services.admin_address --env "${INSTALL_DIR}/.env" --local-health
+}
+
 setup_firewall() {
     log_info "配置防火墙..."
 
-    # 检测防火墙类型
+    local health_url manage_port transport
+    health_url=$(configured_health_url) || { log_fail "防火墙配置" "无法读取实际管理端口"; return 1; }
+    manage_port=${health_url##*:}; manage_port=${manage_port%%/*}
+    case "${VPN_PROTO:-udp}" in tcp*) transport=tcp ;; *) transport=udp ;; esac
     if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
-        ufw allow "${WEB_PORT}/tcp" >> "$LOG_FILE" 2>&1
-        if [[ "${HTTPS_ENABLED:-0}" == "1" ]]; then ufw allow 443/tcp >> "$LOG_FILE" 2>&1; fi
-        ufw allow "${VPN_PORT}/udp" >> "$LOG_FILE" 2>&1
-        log_success "UFW 防火墙放行端口: ${WEB_PORT}/tcp${HTTPS_ENABLED:+, 443/tcp}, ${VPN_PORT}/udp"
+        ufw allow "${manage_port}/tcp" >> "$LOG_FILE" 2>&1
+        ufw allow "${VPN_PORT}/${transport}" >> "$LOG_FILE" 2>&1
     elif command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null 2>&1; then
-        firewall-cmd --permanent --add-port="${WEB_PORT}/tcp" >> "$LOG_FILE" 2>&1
-        if [[ "${HTTPS_ENABLED:-0}" == "1" ]]; then firewall-cmd --permanent --add-port=443/tcp >> "$LOG_FILE" 2>&1; fi
-        firewall-cmd --permanent --add-port="${VPN_PORT}/udp" >> "$LOG_FILE" 2>&1
+        firewall-cmd --permanent --add-port="${manage_port}/tcp" >> "$LOG_FILE" 2>&1
+        firewall-cmd --permanent --add-port="${VPN_PORT}/${transport}" >> "$LOG_FILE" 2>&1
         firewall-cmd --reload >> "$LOG_FILE" 2>&1
-        log_success "firewalld 放行端口: ${WEB_PORT}/tcp, ${VPN_PORT}/udp"
     else
-        # 使用 iptables（-w 5 等待 xtables 锁，避免并发失败）
-        iptables -w 5 -I INPUT -p tcp --dport "${WEB_PORT}" -j ACCEPT >> "$LOG_FILE" 2>&1
-        if [[ "${HTTPS_ENABLED:-0}" == "1" ]]; then iptables -w 5 -I INPUT -p tcp --dport 443 -j ACCEPT >> "$LOG_FILE" 2>&1; fi
-        iptables -w 5 -I INPUT -p udp --dport "${VPN_PORT}" -j ACCEPT >> "$LOG_FILE" 2>&1
-        log_success "iptables 放行端口: ${WEB_PORT}/tcp, ${VPN_PORT}/udp"
+        iptables -w 5 -I INPUT -p tcp --dport "${manage_port}" -j ACCEPT >> "$LOG_FILE" 2>&1
+        iptables -w 5 -I INPUT -p "${transport}" --dport "${VPN_PORT}" -j ACCEPT >> "$LOG_FILE" 2>&1
     fi
+    log_success "已添加防火墙放行规则：管理 ${manage_port}/tcp，VPN ${VPN_PORT}/${transport}"
+    log_info "管理页面仍由应用限制为 VPN 来源；端口放行不代表公网可以登录。"
 }
 
 
@@ -1383,9 +1423,7 @@ diagnose_certs() {
 }
 
 fix_certs_pipeline() {
-    log_info "执行证书链路修复（含代码部署 + helper 重写）..."
-    # 关键：网页跑的是 /opt/openvpn-admin，不是源码目录；不部署会一直用旧逻辑
-    deploy_project || true
+    log_info "修复已安装版本的证书权限和服务单元；完整升级请使用 --repair"
     setup_service_user || true
     repair_service_unit || true
     if ! fix_cert_permissions; then
@@ -1395,7 +1433,7 @@ fix_certs_pipeline() {
     systemctl restart "${APP_NAME}" 2>/dev/null || true
     sleep 2
     diagnose_certs || true
-    log_info "证书链路修复完成。请在网页验证：「同步已有证书」「新增客户端」"
+    log_info "证书修复步骤执行结束，请检查上方结果；连接 VPN 后验证同步和新增客户端。"
     log_info "若创建仍失败，用新名称试：如 test01（避免与 EasyRSA 中已有 fjz 冲突）"
 }
 
@@ -1499,54 +1537,24 @@ print('    backend.database OK')
     fi
 
     echo ""
-    log_info "  调用登录 API POST /api/auth/login"
-    export DIAG_LOGIN_USER="${login_user}"
-    export DIAG_LOGIN_PASS="${login_pass}"
-    if sudo -u "${APP_USER}" env \
-        DIAG_LOGIN_USER="${login_user}" \
-        DIAG_LOGIN_PASS="${login_pass}" \
-        python3 - <<'PY'
-import json, os, urllib.request
-user = os.environ.get("DIAG_LOGIN_USER", "admin")
-password = os.environ.get("DIAG_LOGIN_PASS", "")
-body = json.dumps({"username": user, "password": password}).encode()
-req = urllib.request.Request(
-    "http://127.0.0.1/api/auth/login",
-    data=body,
-    headers={"Content-Type": "application/json"},
-    method="POST",
-)
-try:
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        print("    HTTP", resp.status)
-        print("    body:", resp.read().decode()[:400])
-except Exception as e:
-    code = getattr(e, "code", None)
-    data = e.read().decode()[:400] if hasattr(e, "read") else str(e)
-    print("    HTTP", code)
-    print("    body:", data)
-    raise SystemExit(1)
-PY
-    then
-        log_success "登录 API 正常"
-    else
-        log_fail "登录 API" "仍失败，最近应用日志如下"
-        journalctl -u "${APP_NAME}" -n 30 --no-pager 2>/dev/null | grep -E 'ERROR|数据库|登录|Traceback|OperationalError|IntegrityError|Exception|ovpn\.' \
-            || journalctl -u "${APP_NAME}" -n 30 --no-pager 2>/dev/null || true
-    fi
+    log_info "本机不执行密码登录测试：后台仅允许 VPN 来源，且登录需要一次性验证码。"
+    log_info "请连接 VPN 后打开安装结果中的隧道内地址，完成验证码与密码登录验收。"
 }
 
 verify_install() {
     log_info "执行部署验证..."
 
     # 等待 Web 启动（uvicorn 绑定/装路由需要时间）
-    local i health_ok=0 port_ok=0
+    local i health_ok=0 port_ok=0 health_url manage_port
+    health_url=$(configured_health_url) || { log_fail "健康检查配置" "无法读取实际管理协议/端口"; return 1; }
+    manage_port=${health_url##*:}; manage_port=${manage_port%%/*}
+    log_info "检查已配置的本机管理端点：${health_url}（仅验证可用性，不验证 TLS 证书信任）"
     for i in 1 2 3 4 5 6 7 8 9 10; do
         sleep 1
-        if ! port_ok && ss -lnt 2>/dev/null | grep -qE ":${WEB_PORT}\\b"; then
+        if [[ "$port_ok" -eq 0 ]] && ss -lnt 2>/dev/null | grep -qE ":${manage_port}\\b"; then
             port_ok=1
         fi
-        if curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${WEB_PORT}/api/health" 2>/dev/null | grep -q "200"; then
+        if curl --noproxy '*' -k -s --connect-timeout 2 --max-time 3 -o /dev/null -w "%{http_code}" "$health_url" 2>/dev/null | grep -q "200"; then
             health_ok=1
             break
         fi
@@ -1555,14 +1563,14 @@ verify_install() {
     if [[ "$health_ok" -eq 1 ]]; then
         log_success "Web 服务健康检查通过"
     else
-        log_warn "Web 服务健康检查未通过（等待 10s），请检查 journalctl -u ${APP_NAME}"
+        log_fail "Web 服务健康检查" "限定重试内未通过，请检查 journalctl -u ${APP_NAME}"
         journalctl -u "${APP_NAME}" -n 20 --no-pager 2>/dev/null | grep -E 'error|Error|bind|Permission|address|Traceback|listen' | tail -10 | sed 's/^/    /' || true
     fi
 
-    if [[ "$port_ok" -eq 1 ]] || ss -lnt 2>/dev/null | grep -qE ":${WEB_PORT}\\b"; then
-        log_success "端口 ${WEB_PORT} 已监听"
+    if [[ "$port_ok" -eq 1 ]] || ss -lnt 2>/dev/null | grep -qE ":${manage_port}\\b"; then
+        log_success "端口 ${manage_port} 已监听"
     else
-        log_warn "端口 ${WEB_PORT} 未监听（特权端口需 CAP_NET_BIND_SERVICE）"
+        log_fail "端口 ${manage_port} 未监听" "特权端口需 CAP_NET_BIND_SERVICE；请检查服务日志"
     fi
 
     # 检查数据库 + 登录链路
@@ -1635,16 +1643,26 @@ verify_install() {
 print_summary() {
     echo ""
     echo "============================================================"
-    echo -e "${GREEN}       安装完成！${NC}"
+    if [[ "$CHECK_FAILURES" -gt 0 ]]; then
+        echo -e "${YELLOW}       操作结束：有 ${CHECK_FAILURES} 项检查失败，请先处理${NC}"
+    elif [[ "$RUN_MODE" == "repair" ]]; then
+        echo -e "${GREEN}       修复步骤执行完成，VPN 内登录待验收${NC}"
+    else
+        echo -e "${GREEN}       安装步骤执行完成，VPN 内登录待验收${NC}"
+    fi
     echo "============================================================"
     echo ""
-    echo "📌 管理平台访问地址："
-    echo "   http://${SERVER_IP}:${WEB_PORT}"
+    echo "📌 管理平台仅允许 VPN 网络访问："
+    echo "   1. 先导入客户端配置并连接 OpenVPN。"
+    echo "   2. 连接成功后使用以下 VPN 隧道地址访问后台："
+    PYTHONPATH="${INSTALL_DIR}" "${INSTALL_DIR}/venv/bin/python" -m backend.services.admin_address --env "${INSTALL_DIR}/.env" || true
+    echo "   公网 IP/域名不能作为管理入口；公网 VPN 连接地址保持原用途。"
+    echo "   无法连接时，请通过 SSH 检查 VPN 路由、防火墙和 OVPM_ADMIN_VPN_CIDRS。"
     echo ""
-    echo "🔐 管理员账号："
+    echo "🔐 初始管理员账号（已改名时以现有数据库账号为准）："
     echo "   用户名：${DEFAULT_ADMIN_USER}"
-    if [[ "$RUN_MODE" == "repair" || "$RUN_MODE" == "diagnose" ]]; then
-        echo "   密码：  （已保留原密码，见 ${INSTALL_DIR}/.env 中 OVPM_ADMIN_PASSWORD）"
+    if [[ "$RUN_MODE" == "repair" || "$RUN_MODE" == "diagnose" || "$INITIAL_CREDENTIALS_REUSED" -eq 1 ]]; then
+        echo "   密码：  （保留数据库中的现有密码；.env 仅保存初始化口令，可能不是当前密码）"
     else
         echo "   密码：  ${DEFAULT_ADMIN_PASSWORD}"
         echo ""
@@ -1656,7 +1674,7 @@ print_summary() {
     echo ""
     echo "🔧 常用命令："
     echo "   sudo bash scripts/install.sh --repair     # 启动失败/登录异常时修复"
-    echo "   sudo bash scripts/install.sh --diagnose   # 仅诊断登录、数据库、证书链路"
+    echo "   sudo bash scripts/install.sh --diagnose   # 诊断并修复数据权限、初始化缺失表；非只读"
     echo "   sudo bash scripts/install.sh --fix-certs  # 证书操作失败/导入失败时修复"
     echo "   journalctl -u ${APP_NAME} -f"
     echo ""
@@ -1669,7 +1687,6 @@ print_summary() {
     echo "   sudo ovpn-client-quick sync-hint        # 检查网页签发/同步依赖"
     echo ""
     echo "============================================================"
-    echo "============================================================"
     echo ""
     echo "📖 详细操作说明请查看: ${INSTALL_DIR}/docs/OPERATIONS.md"
     echo ""
@@ -1681,7 +1698,7 @@ print_summary() {
 main() {
     init_install "$@"
 
-    # ---- 仅诊断：不改代码，只查登录/数据库/证书 ----
+    # ---- 诊断：检查数据库/证书，修复数据权限并初始化缺失表 ----
     if [[ "$RUN_MODE" == "diagnose" ]]; then
         check_ubuntu
         # 读取现有 .env 端口用于展示
@@ -1692,7 +1709,7 @@ main() {
         fix_data_permissions
         diagnose_login
         diagnose_certs
-        exit 0
+        exit "$((CHECK_FAILURES > 0))"
     fi
 
     # ---- 仅修复证书链路：systemd 提权 + PKI 权限 ----
@@ -1703,7 +1720,7 @@ main() {
             [[ "$wp" =~ ^[0-9]+$ ]] && WEB_PORT="$wp"
         fi
         fix_certs_pipeline
-        exit 0
+        exit "$((CHECK_FAILURES > 0))"
     fi
 
     # ---- 修复模式：清旧入口、重部署、重写 systemd、校验登录/证书 ----
@@ -1724,7 +1741,6 @@ main() {
         fi
         deploy_project
         deploy_cli_tools
-        install_python_deps
         setup_openvpn_config
         setup_blacklist_base
         setup_app_config
@@ -1734,7 +1750,7 @@ main() {
         fix_data_permissions
         verify_install
         print_summary
-        exit 0
+        exit "$((CHECK_FAILURES > 0))"
     fi
 
     # ---- 默认：完整安装 / 覆盖升级 ----
@@ -1744,7 +1760,6 @@ main() {
     install_system_deps
     deploy_project
     deploy_cli_tools
-    install_python_deps
     setup_openvpn
     setup_openvpn_config
     setup_blacklist_base
@@ -1760,5 +1775,5 @@ main() {
 # 执行主流程
 main "$@"
 
-exit 0
+exit "$((CHECK_FAILURES > 0))"
 

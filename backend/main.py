@@ -7,13 +7,15 @@ OpenVPN 管理平台 - FastAPI 主入口
 
 """
 import logging
+import asyncio
+from logging.handlers import RotatingFileHandler
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import config
@@ -22,6 +24,9 @@ from .auth import get_current_user
 from .database import DatabaseError, init_database
 from .routers import audit, auth, clients, connections, dashboard, dns, easyrsa_sync, settings
 from .services.connection_tracker import tracker
+from .services import vpn_access, maintenance
+from .services.frontend_render import render as render_frontend
+from .services.request_limits import RequestBodyLimitMiddleware
 from .security import is_allowed_page
 
 # ==================== 日志配置 ====================
@@ -30,7 +35,7 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(config.DATA_DIR / "app.log", encoding="utf-8"),
+        RotatingFileHandler(config.DATA_DIR / "app.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"),
     ],
 )
 logger = logging.getLogger("ovpn.main")
@@ -43,6 +48,10 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 50)
     logger.info("OpenVPN 管理平台启动中...")
     logger.info("=" * 50)
+
+    vpn_access.NETWORKS = vpn_access.load_networks()
+    if not vpn_access.NETWORKS:
+        raise RuntimeError("无法确定管理访问 VPN 网段，请设置 OVPM_ADMIN_VPN_CIDRS，例如 10.8.0.0/24")
 
     # 启动前安全检查：生产环境必须显式提供随机 JWT 密钥和管理员密码
     if len(config.JWT_SECRET) < 32:
@@ -58,16 +67,24 @@ async def lifespan(app: FastAPI):
         raise
 
     await tracker.start()
-    yield
-    await tracker.stop()
-    logger.info("OpenVPN 管理平台已关闭")
+    maintenance_task = asyncio.create_task(maintenance.run(), name="ovpn-maintenance")
+    try:
+        yield
+    finally:
+        maintenance_task.cancel()
+        try:
+            await maintenance_task
+        except asyncio.CancelledError:
+            pass
+        await tracker.stop()
+        logger.info("OpenVPN 管理平台已关闭")
 
 
 # ==================== 创建应用 ====================
 app = FastAPI(
     title="OpenVPN 管理平台",
     description="OpenVPN 客户端、连接、域名黑名单与网络设置管理",
-    version="4.3.10",
+    version="5.0.0",
     lifespan=lifespan,
     docs_url="/api/docs",      # Swagger 文档（可按需关闭）
     redoc_url=None,
@@ -86,15 +103,24 @@ app.add_middleware(
 )
 
 
+app.add_middleware(RequestBodyLimitMiddleware)
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
+    peer = request.client.host if request.client else ""
+    if not vpn_access.allowed(peer, request.url.path):
+        return JSONResponse(status_code=403, content={"detail": "管理平台仅允许通过 VPN 访问，请先连接 VPN，并使用服务器 VPN 内网地址"}, headers={"Cache-Control": "no-store"})
     response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     # 当前允许 HTTP/IP 直连，因此暂不启用 HSTS；未来切换 HTTPS 后再打开。
     response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    if request.url.path == "/pages/settings.html":
+        response.headers["Content-Security-Policy"] += "; connect-src 'self' https://api.ipify.org https://api6.ipify.org"
     return response
 
 
@@ -102,7 +128,7 @@ async def security_headers(request: Request, call_next):
 @app.exception_handler(DatabaseError)
 async def db_error_handler(request: Request, exc: DatabaseError):
     """数据库异常 → 友好提示，不暴露堆栈。"""
-    logger.error("数据库错误: %s", exc.message)
+    logger.error("数据库错误: %s", str(exc))
     return JSONResponse(
         status_code=500,
         content={"code": 500, "message": "服务器繁忙，请稍后重试", "data": None},
@@ -163,12 +189,13 @@ if safe_exists(FRONTEND_DIR):
     # 挂载静态资源
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
+    @app.get("/index.html", include_in_schema=False)
     @app.get("/")
     async def index():
         """首页 → 登录页。"""
         index_file = FRONTEND_DIR / "index.html"
         if safe_exists(index_file):
-            return FileResponse(str(index_file))
+            return HTMLResponse(render_frontend(index_file, FRONTEND_DIR))
         return JSONResponse(
             status_code=404,
             content={"code": 404, "message": "前端文件未找到", "data": None},
@@ -187,7 +214,7 @@ if safe_exists(FRONTEND_DIR):
             return JSONResponse(status_code=404, content={"code": 404, "message": "页面不存在", "data": None})
         page_file = FRONTEND_DIR / "pages" / page_name
         if safe_exists(page_file) and safe_is_file(page_file):
-            return FileResponse(str(page_file))
+            return HTMLResponse(render_frontend(page_file, FRONTEND_DIR))
         return JSONResponse(status_code=404, content={"code": 404, "message": "页面不存在", "data": None})
 
 
@@ -215,6 +242,7 @@ if __name__ == "__main__":
         logger.info("检测到 SSL 证书，以 HTTPS 模式启动")
         uvicorn.run(
             "backend.main:app",
+            proxy_headers=False,
             host=config.WEB_HOST,
             port=config.HTTPS_PORT,
             **ssl_args,
@@ -223,6 +251,7 @@ if __name__ == "__main__":
         logger.info("以 HTTP 模式启动（可挂载证书切换 HTTPS）")
         uvicorn.run(
             "backend.main:app",
+            proxy_headers=False,
             host=config.WEB_HOST,
             port=config.WEB_PORT,
         )

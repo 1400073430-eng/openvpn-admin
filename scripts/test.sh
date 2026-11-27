@@ -22,4 +22,8 @@ print('[PASS] All project shell/Python syntax')
 PY
 for file in frontend/js/*.js; do node --check "$file"; done
 node tests/test_ipv6_ui.js
+node tests/test_list_view.js
+node tests/test_egress_ui.js
+node tests/test_password_ui.js
+node tests/test_auth_ui.js
 printf '%s\n' '[PASS] Local test suite completed. Real VPS networking still requires deployment acceptance.'

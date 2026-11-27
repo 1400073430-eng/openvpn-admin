@@ -38,7 +38,9 @@ async def get_settings(username: str = Depends(get_current_user)):
                 settings[r["key"]] = r["value"]
 
         https_enabled = bool(config.HTTPS_ENABLED and config.safe_exists(config.SSL_CERT_FILE) and config.safe_exists(config.SSL_KEY_FILE))
+        from ..services.maintenance import status as maintenance_status
         data = {
+            "maintenance": maintenance_status(),
             "paths": {
                 "easyrsa_dir": str(config.EASYRSA_DIR),
                 "openvpn_dir": str(config.OPENVPN_DIR),
@@ -99,7 +101,7 @@ async def update_settings(
                 )
 
         log_action(username, "更新系统设置", str(updates), get_client_ip(request))
-        return {"code": 200, "message": "设置已更新", "data": updates}
+        return {"code": 200, "message": "管理平台记录已更新，OpenVPN 配置未修改", "data": updates}
 
     except HTTPException:
         raise
@@ -152,3 +154,10 @@ def download_ipv6_script(request: Request, username: str = Depends(get_current_u
     return {"code": 200, "message": "脚本仅下载，尚未应用", "data": {
         "filename": "ovpn-dualstack-upgrade.py",
         "script": Path(ipv6_upgrade.__file__).read_text(encoding="utf-8")}}
+
+
+@router.post("/node-check")
+def check_node(username: str = Depends(get_current_user)):
+    """Manually query fixed third-party services; no network mutation."""
+    from ..services.node_check import check
+    return {"code": 200, "message": "ok", "data": check()}

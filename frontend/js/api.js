@@ -36,9 +36,15 @@
     },
     logout: function () {
       var self = this;
-      Api.post("/api/auth/logout").catch(function () {}).then(function () {
+      return Api.post("/api/auth/logout").then(function () {
         self.clear();
         window.location.href = "/index.html";
+      }).catch(function (err) {
+        if (!self.isLoggedIn()) {
+          window.location.href = "/index.html";
+          return;
+        }
+        Toast.error("退出未完成，请重试：" + (err.message || "网络错误"));
       });
     }
   };
@@ -65,15 +71,14 @@
         xhr.onreadystatechange = function () {
           if (xhr.readyState !== 4) return;
 
-          if (xhr.status === 401) {
+          if (xhr.status === 401 && url.split("?")[0] !== "/api/auth/login") {
             Auth.clear();
             if (!window.location.pathname.endsWith("index.html") && window.location.pathname !== "/") {
-              Toast.error("登录已过期，请重新登录");
               setTimeout(function () {
                 window.location.href = "/index.html";
               }, 1200);
             }
-            reject(new Error("未授权"));
+            reject(new Error("登录已过期，请重新登录"));
             return;
           }
 
@@ -158,8 +163,9 @@
           URL.revokeObjectURL(a.href);
           Toast.success("配置文件已下载");
         } else if (xhr.status === 401) {
-          Toast.error("登录已过期");
-          Auth.logout();
+          Toast.error("登录已过期，请重新登录");
+          Auth.clear();
+          window.location.href = "/index.html";
         } else {
           // 尝试读取错误详情（FastAPI detail 或统一 message）
           var fail = function (msg) {
@@ -287,6 +293,25 @@
       form.querySelectorAll("input, textarea, select").forEach(function (i) {
         i.style.borderColor = "";
       });
+    }
+  };
+
+  // ==================== 列表页通用状态 ====================
+  window.ListView = {
+    url: function (path, page, pageSize, keyword) {
+      var url = path + "?page=" + page + "&page_size=" + pageSize;
+      return keyword ? url + "&keyword=" + encodeURIComponent(keyword) : url;
+    },
+    loading: function (tbody, columns) {
+      tbody.innerHTML = '<tr><td colspan="' + columns + '" class="text-center text-secondary">加载中...</td></tr>';
+    },
+    empty: function (tbody, columns, icon, message) {
+      tbody.innerHTML = '<tr><td colspan="' + columns + '"><div class="empty-state"><div class="empty-icon">' +
+        escHtml(icon) + '</div><div class="empty-text">' + escHtml(message) + '</div></div></td></tr>';
+    },
+    error: function (tbody, columns, err) {
+      tbody.innerHTML = '<tr><td colspan="' + columns + '" class="text-center text-danger">' +
+        escHtml((err && err.message) || "加载失败") + '</td></tr>';
     }
   };
 

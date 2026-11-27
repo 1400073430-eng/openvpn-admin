@@ -38,6 +38,15 @@ class PlatformRegression(unittest.TestCase):
         for router in (auth.router, dns.router, settings.router):
             app.include_router(router)
         self.client = TestClient(app)
+        original_post = self.client.post
+        def post_with_captcha(url, **kwargs):
+            if url == '/api/auth/login':
+                from backend.services import login_guard
+                with patch.object(login_guard.secrets, 'choice', return_value='A'):
+                    challenge = self.client.get('/api/auth/captcha').json()
+                kwargs['json'] = dict(kwargs['json'], captcha_id=challenge['id'], captcha_answer='AAAAA')
+            return original_post(url, **kwargs)
+        self.client.post = post_with_captcha
         self.addCleanup(self.client.close)
 
     def login(self, password='Test-only-password-123'):
@@ -75,6 +84,102 @@ class PlatformRegression(unittest.TestCase):
         self.assertEqual(self.client.get('/api/auth/me').status_code, 401)
         self.client.cookies.clear()
         self.login('Changed-test-password-456')
+
+    def test_username_change_requires_password_and_revokes_old_sessions(self):
+        self.login()
+        old_token = self.client.cookies.get(config.AUTH_COOKIE_NAME)
+        self.assertEqual(self.client.post('/api/auth/change-username', json={
+            'new_username': 'new_admin', 'current_password': 'incorrect-password'
+        }).status_code, 400)
+        self.assertEqual(self.client.get('/api/auth/me').status_code, 200)
+        self.assertEqual(self.client.post('/api/auth/change-username', json={
+            'new_username': 'bad-name', 'current_password': 'Test-only-password-123'
+        }).status_code, 422)
+        response = self.client.post('/api/auth/change-username', json={
+            'new_username': 'new_admin', 'current_password': 'Test-only-password-123'
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        database.init_database()  # 模拟服务重启，不能重新创建默认管理员
+        with database.get_db() as conn:
+            admins = [row['username'] for row in conn.execute('SELECT username FROM admins')]
+        self.assertEqual(admins, ['new_admin'])
+        self.client.cookies.set(config.AUTH_COOKIE_NAME, old_token)
+        self.assertEqual(self.client.get('/api/auth/me').status_code, 401)
+        self.client.cookies.clear()
+        self.assertEqual(self.client.post('/api/auth/login', json={
+            'username': 'admin', 'password': 'Test-only-password-123'
+        }).status_code, 401)
+        self.assertEqual(self.client.post('/api/auth/login', json={
+            'username': 'new_admin', 'password': 'Test-only-password-123'
+        }).status_code, 200)
+
+    def test_login_rejects_credentials_changed_before_session_creation(self):
+        original = auth.create_access_token
+        for operation in ('password', 'username'):
+            with self.subTest(operation=operation):
+                with database.get_db() as conn:
+                    conn.execute("UPDATE admins SET username = 'admin', password_hash = ?", (security.hash_password('Test-only-password-123'),))
+                def change_before_insert(username):
+                    with database.get_db() as conn:
+                        if operation == 'password':
+                            conn.execute("UPDATE admins SET password_hash = ? WHERE username = ?", (security.hash_password('Changed-password-456'), username))
+                        else:
+                            conn.execute("UPDATE admins SET username = 'renamed' WHERE username = ?", (username,))
+                        conn.execute("UPDATE auth_sessions SET revoked_at = datetime('now') WHERE username = ?", (username,))
+                    return original(username)
+                with patch.object(auth, 'create_access_token', side_effect=change_before_insert):
+                    response = self.client.post('/api/auth/login', json={'username': 'admin', 'password': 'Test-only-password-123'})
+                self.assertEqual(response.status_code, 401, response.text)
+                with database.get_db() as conn:
+                    self.assertEqual(conn.execute("SELECT count(*) FROM auth_sessions WHERE revoked_at IS NULL").fetchone()[0], 0)
+
+    def test_database_error_handler_returns_controlled_response(self):
+        import asyncio
+        from backend.main import db_error_handler
+        from starlette.requests import Request
+        response = asyncio.run(db_error_handler(Request({'type': 'http'}), database.DatabaseError('internal detail')))
+        self.assertEqual(response.status_code, 500)
+        self.assertNotIn(b'internal detail', response.body)
+
+    def test_audit_and_session_retention(self):
+        from backend.services import audit_service
+        with database.get_db() as conn:
+            conn.execute("INSERT INTO auth_sessions (jti, username, expires_at) VALUES ('expired', 'admin', datetime('now', '-1 day'))")
+            conn.execute("INSERT INTO audit_logs (username, action, created_at) VALUES ('admin', 'old', datetime('now', '-31 days'))")
+        with patch.object(audit_service, '_last_database', None):
+            audit_service.cleanup_records()
+        with database.get_db() as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM auth_sessions").fetchone()[0], 0)
+            self.assertEqual(conn.execute("SELECT count(*) FROM audit_logs WHERE action = 'old'").fetchone()[0], 0)
+
+    def test_audit_control_characters_cannot_forge_log_lines(self):
+        from backend.services.audit_service import log_action
+        log_action('admin', 'test', 'detail\nFORGED\rline\x00')
+        with database.get_db() as conn:
+            detail = conn.execute("SELECT detail FROM audit_logs WHERE action = 'test'").fetchone()[0]
+        self.assertNotIn('\n', detail)
+        self.assertNotIn('\r', detail)
+        self.assertNotIn('\x00', detail)
+
+    def test_cleanup_expires_only_stale_challenges_limits_and_sessions(self):
+        import time
+        from backend.services import audit_service, login_guard
+        now = int(time.time())
+        with database.get_db() as conn:
+            login_guard._prepare(conn, now)
+            for kind, expiry in (('old', now - 1), ('valid', now + 600)):
+                conn.execute('INSERT INTO login_limits VALUES (?, 1, ?)', (kind, expiry))
+                conn.execute('INSERT INTO login_challenges VALUES (?, ?, ?, ?)', (kind, 'digest', 'ip', expiry))
+            conn.execute("INSERT INTO auth_sessions (jti, username, expires_at) VALUES ('active', 'admin', datetime('now', '+1 hour'))")
+            conn.execute("INSERT INTO auth_sessions (jti, username, expires_at) VALUES ('expired', 'admin', datetime('now', '-1 hour'))")
+        counts = audit_service.cleanup_records(force=True)
+        self.assertEqual(counts['login_limits'], 1)
+        self.assertEqual(counts['login_challenges'], 1)
+        with database.get_db() as conn:
+            self.assertEqual([r[0] for r in conn.execute('SELECT id FROM login_challenges')], ['valid'])
+            self.assertEqual([r[0] for r in conn.execute('SELECT key FROM login_limits')], ['valid'])
+            self.assertEqual([r[0] for r in conn.execute('SELECT jti FROM auth_sessions')], ['active'])
+            self.assertEqual(conn.execute('SELECT count(*) FROM admins').fetchone()[0], 1)
 
     def test_settings_write_and_read(self):
         self.login()
@@ -154,7 +259,11 @@ class PlatformRegression(unittest.TestCase):
 class MainRouteSmoke(unittest.TestCase):
     def test_all_existing_business_routes_remain_protected(self):
         from backend.main import app
-        client = TestClient(app)  # No context manager: don't start the real tracker.
+        from backend.services import vpn_access
+        import ipaddress
+        self.addCleanup(patch.stopall)
+        patch.object(vpn_access, 'NETWORKS', (ipaddress.ip_network('10.8.0.0/24'),)).start()
+        client = TestClient(app, client=('10.8.0.2', 12345))  # No context manager: don't start the real tracker.
         self.addCleanup(client.close)
         checked = 0
         import json
@@ -165,7 +274,7 @@ class MainRouteSmoke(unittest.TestCase):
         self.assertEqual(actual, expected)
         for entry in actual:
             method, path = entry.split(' ', 1)
-            if path in ('/api/health', '/api/auth/login'):
+            if path in ('/api/health', '/api/auth/login', '/api/auth/captcha'):
                 continue
             path = path.replace('{name}', 'test-client').replace('{client_id}', '1').replace('{domain_id}', '1')
             response = client.request(method, path, json={} if method in ('POST', 'PUT') else None)
@@ -177,7 +286,7 @@ class MainRouteSmoke(unittest.TestCase):
         for page in ('dashboard', 'clients', 'connections', 'dns', 'audit', 'settings'):
             self.assertEqual(client.get('/pages/' + page + '.html').status_code, 200)
         self.assertEqual(client.get('/pages/unknown.html').status_code, 404)
-        self.assertEqual(app.version, '4.3.10')
+        self.assertEqual(app.version, '5.0.0')
 
 
 if __name__ == '__main__':

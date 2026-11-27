@@ -5,6 +5,18 @@ set -Eeuo pipefail
 umask 077
 log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*"; }
 die() { printf '[错误] %s\n' "$*" >&2; exit 1; }
+uninstall_issues=0
+mark_issue() {
+  uninstall_issues=$((uninstall_issues + 1))
+  log "[未完成] $*"
+}
+report_uninstall_result() {
+  if [[ "$leftover" -ne 0 || "$uninstall_issues" -ne 0 ]]; then
+    log "卸载未完全完成：检测到残留或失败步骤，请检查上方输出。"
+    return 1
+  fi
+  log "已完成的检查未发现残留；缺少检查工具的项目未验证。共享 journal、外部备份及手动复制文件未清理。"
+}
 [[ ${EUID:-$(id -u)} -eq 0 ]] || die "请使用 root 运行：sudo bash $0"
 command -v systemctl >/dev/null 2>&1 || die "未找到 systemctl；此脚本面向 Ubuntu/Debian 的 systemd 系统。"
 
@@ -145,13 +157,15 @@ if command -v nft >/dev/null 2>&1; then
 fi
 
 log "删除 OpenVPN Admin 专用系统账户（若存在）"
-if getent passwd ovpn-admin >/dev/null 2>&1; then userdel ovpn-admin >/dev/null 2>&1 || true; fi
-if getent group ovpn-admin >/dev/null 2>&1; then groupdel ovpn-admin >/dev/null 2>&1 || true; fi
+if getent passwd ovpn-admin >/dev/null 2>&1; then userdel ovpn-admin >/dev/null 2>&1 || mark_issue "系统用户 ovpn-admin 删除失败"; fi
+if getent group ovpn-admin >/dev/null 2>&1; then groupdel ovpn-admin >/dev/null 2>&1 || mark_issue "系统组 ovpn-admin 删除失败"; fi
 
 log "卸载 OpenVPN / Easy-RSA 软件包（若由 apt 安装）"
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
-  apt-get purge -y openvpn easy-rsa || log "提示：apt purge 未完全成功，请检查上方 apt 输出和软件包状态。"
+  apt-get purge -y openvpn easy-rsa || mark_issue "apt purge 未完全成功，请检查软件包状态。"
+else
+  mark_issue "未找到 apt-get，未验证软件包卸载状态"
 fi
 
 systemctl daemon-reload
@@ -164,8 +178,13 @@ done
 if command -v nft >/dev/null 2>&1 && nft list table inet ovpn_admin >/dev/null 2>&1; then
   printf '[残留] nft table inet ovpn_admin\n'; leftover=1
 fi
-if [[ "$leftover" -eq 0 ]]; then
-  log "常见路径检查通过。共享 systemd journal 未清空；其他位置的手动复制文件/外部备份不会被全盘搜索。"
-else
-  log "检测到残留项，请按上方路径检查权限或仍在运行的进程。"
+if command -v nft >/dev/null 2>&1 && nft list table inet ovpn_dualstack >/dev/null 2>&1; then
+  printf '[残留] nft table inet ovpn_dualstack\n'; leftover=1
 fi
+for unit in "${units[@]:-}"; do
+  [[ -n "$unit" ]] || continue
+  if systemctl is-active --quiet "$unit"; then
+    printf '[残留] 仍在运行: %s\n' "$unit"; leftover=1
+  fi
+done
+report_uninstall_result

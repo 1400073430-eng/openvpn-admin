@@ -56,9 +56,9 @@ def _session_active(jti: str, username: str) -> bool:
     """检查服务端会话是否存在、未吊销且未过期。"""
     with get_db() as conn:
         row = conn.execute(
-            """SELECT 1 FROM auth_sessions
-               WHERE jti = ? AND username = ? AND revoked_at IS NULL
-                 AND datetime(expires_at) > datetime('now')""",
+            """SELECT 1 FROM auth_sessions AS s JOIN admins AS a ON a.username = s.username
+               WHERE s.jti = ? AND s.username = ? AND s.revoked_at IS NULL
+                 AND datetime(s.expires_at) > datetime('now')""",
             (jti, username),
         ).fetchone()
     return bool(row)

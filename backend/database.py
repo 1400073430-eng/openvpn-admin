@@ -7,6 +7,7 @@ SQLite 数据库模块
 """
 import sqlite3
 import logging
+import time
 from contextlib import contextmanager
 
 from fastapi import HTTPException
@@ -24,11 +25,25 @@ def _get_connection() -> sqlite3.Connection:
         timeout=15.0,  # 锁等待 15 秒
         check_same_thread=False,
     )
-    conn.row_factory = sqlite3.Row  # 结果可按列名访问
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=15000")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row  # 结果可按列名访问
+        conn.execute("PRAGMA busy_timeout=15000")
+        # journal_mode is a write operation when a new database is first opened.
+        # Concurrent Web/diagnostic startup may race before either process enables WAL.
+        for attempt in range(15):
+            try:
+                if conn.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
+                    conn.execute("PRAGMA journal_mode=WAL")
+                break
+            except sqlite3.OperationalError as exc:
+                if attempt == 14 or not any(word in str(exc).lower() for word in ("locked", "busy")):
+                    raise
+                time.sleep(0.1)
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+    except Exception:
+        conn.close()
+        raise
 
 
 @contextmanager
@@ -88,14 +103,14 @@ def init_database() -> None:
     可重复调用（幂等）。
 
     注意：Web 服务启动与安装诊断可能并发执行；
-    必须用 INSERT OR IGNORE / 按用户名存在性判断，避免 UNIQUE 冲突。
+    只在管理员表为空时创建初始账号；已改名的管理员不得触发默认账号重建。
     """
     try:
         with get_db() as conn:
             conn.executescript(SCHEMA_SQL)
+            conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
-                "SELECT id FROM admins WHERE username = ?",
-                (config.DEFAULT_ADMIN_USER,),
+                "SELECT id FROM admins LIMIT 1",
             ).fetchone()
             if existing:
                 return

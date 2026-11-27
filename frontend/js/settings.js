@@ -19,10 +19,18 @@
       '<button class="btn btn-secondary btn-sm" id="btn-selftest">运行自测</button></div>' +
       '<div class="panel-body" id="services-panel">加载中...</div>' +
     '</div>' +
+    '<div class="panel"><div class="panel-header"><h2 class="panel-title">节点出口检测</h2></div>' +
+    '<div class="panel-body"><p>手动向 ipify.org 和 ipwho.is 查询服务器出口及归属；查询服务会收到出口 IP。结果缓存 5 分钟。</p>' +
+    '<button type="button" class="btn btn-secondary mt-2" id="btn-node-check">检测节点</button>' +
+    '<div id="node-check-result" class="mt-2">尚未检测。此功能不检测黑名单、滥用历史或客户端泄漏。</div></div></div>' +
+    '<div class="panel"><div class="panel-header"><h2 class="panel-title">自动清理</h2></div>' +
+    '<div class="panel-body"><p>服务启动后执行一次，随后每小时清理过期验证码、限流记录和失效会话；沿用现有审计保留策略。</p>' +
+    '<p>不删除证书、账号、有效会话、升级备份或运行环境。</p><div id="maintenance-status">状态加载中...</div></div></div>' +
     // 网络配置
     '<div class="panel">' +
-      '<div class="panel-header"><h2 class="panel-title">网络配置</h2></div>' +
+      '<div class="panel-header"><h2 class="panel-title">网络信息记录</h2></div>' +
       '<div class="panel-body">' +
+        '<p class="text-secondary">此处仅保存管理平台记录，不修改 OpenVPN 配置或重启服务。</p>' +
         '<form id="form-network">' +
           '<div class="form-row">' +
             '<div class="form-group">' +
@@ -36,7 +44,7 @@
               '<div class="form-error"></div>' +
             '</div>' +
           '</div>' +
-          '<button type="button" class="btn btn-primary" id="btn-save-network">保存配置</button>' +
+          '<button type="button" class="btn btn-primary" id="btn-save-network">保存记录</button>' +
         '</form>' +
       '</div>' +
     '</div>' +
@@ -62,6 +70,18 @@
     '<div class="panel">' +
       '<div class="panel-header"><h2 class="panel-title">HTTPS 配置</h2></div>' +
       '<div class="panel-body" id="https-panel">加载中...</div>' +
+    '</div>' +
+    // 修改用户名
+    '<div class="panel">' +
+      '<div class="panel-header"><h2 class="panel-title">修改管理员用户名</h2></div>' +
+      '<div class="panel-body"><form id="form-username">' +
+        '<div class="form-group"><label class="form-label">新用户名 *</label>' +
+          '<input class="form-input" id="admin-new-username" autocomplete="username" maxlength="32" placeholder="3-32 位字母、数字或下划线"><div class="form-error"></div></div>' +
+        '<div class="form-group"><label class="form-label">当前密码 *</label>' +
+          '<input class="form-input" type="password" id="admin-current-password" autocomplete="current-password" maxlength="128"><div class="form-error"></div></div>' +
+        '<button type="button" class="btn btn-primary" id="btn-save-username">修改用户名</button>' +
+        '<p class="mt-2 text-secondary">修改后所有管理会话将退出，请用新用户名和原密码重新登录。</p>' +
+      '</form></div>' +
     '</div>' +
     // 修改密码
     '<div class="panel">' +
@@ -92,6 +112,9 @@
   function loadSettings() {
     Api.get("/api/settings").then(function (resp) {
       var d = resp.data || {};
+      var maintenance = d.maintenance || {};
+      document.getElementById("maintenance-status").textContent = !maintenance.last_run ? "尚无本进程清理记录" :
+        "最近执行：" + maintenance.last_run + "；" + (maintenance.result === "ok" ? "执行成功" : "执行失败，下个周期重试，请检查服务日志");
 
       // 服务状态
       var svc = d.services || {};
@@ -166,13 +189,38 @@
       server_ip: ip || undefined,
       vpn_port: port
     }).then(function () {
-      Toast.success("配置已保存");
+      Toast.success("网络信息记录已保存，OpenVPN 配置未修改");
       loadSettings();
     }).catch(function (err) {
       Toast.error(err.message || "保存失败");
     }).then(function () {
       btn.disabled = false;
     });
+  });
+
+  // ========== 修改用户名 ==========
+  document.getElementById("btn-save-username").addEventListener("click", function () {
+    var userEl = document.getElementById("admin-new-username");
+    var pwdEl = document.getElementById("admin-current-password");
+    Validator.clearAllErrors(document.getElementById("form-username"));
+    var newUsername = userEl.value.trim();
+    if (!/^[a-zA-Z0-9_]{3,32}$/.test(newUsername)) {
+      Validator.showError(userEl, "用户名需为 3-32 位字母、数字或下划线");
+      return;
+    }
+    if (!pwdEl.value) {
+      Validator.showError(pwdEl, "请输入当前密码");
+      return;
+    }
+    var btn = this;
+    btn.disabled = true;
+    Api.post("/api/auth/change-username", {new_username: newUsername, current_password: pwdEl.value})
+      .then(function () {
+        Auth.clear();
+        window.location.href = "/index.html";
+      }).catch(function (err) {
+        Toast.error(err.message || "修改用户名失败");
+      }).then(function () { btn.disabled = false; });
   });
 
   // ========== 修改密码 ==========
@@ -215,7 +263,8 @@
     }).then(function () {
       Toast.success("密码修改成功，请重新登录");
       setTimeout(function () {
-        Auth.logout();
+        Auth.clear();
+        window.location.href = "/index.html";
       }, 1500);
     }).catch(function (err) {
       Toast.error(err.message || "修改失败");
@@ -291,6 +340,25 @@
       setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
       Toast.success("脚本已下载；尚未应用网络配置，请在 SSH 中预检后执行。");
     }).catch(function (err) { Toast.error(err.message || "下载失败"); })
+      .then(function () { btn.disabled = false; });
+  });
+  document.getElementById("btn-node-check").addEventListener("click", function () {
+    var btn = this;
+    var output = document.getElementById("node-check-result");
+    btn.disabled = true;
+    output.textContent = "检测中，请稍候…";
+    Api.post("/api/settings/node-check", {}).then(function (resp) {
+      var data = resp.data;
+      var html = "<p>检测时间：" + escHtml(data.checked_at) + (data.cached ? "（缓存）" : "") + "</p>";
+      (data.results || []).forEach(function (r) {
+        html += "<p><strong>IPv" + escHtml(r.version) + "</strong>：" + escHtml(r.ip || r.note || "查询失败") + "</p>";
+        if (r.metadata_status === "ok") {
+          html += "<p>地区：" + escHtml([r.country, r.region, r.city].join(" / ")) +
+            "；ASN：" + escHtml(r.asn) + "；运营商：" + escHtml(r.isp) + "；组织：" + escHtml(r.organization) + "</p>";
+        } else if (r.ip) { html += "<p>归属信息查询失败，未判定为安全或危险。</p>"; }
+      });
+      output.innerHTML = html + "<p>" + escHtml(data.note) + "</p>";
+    }).catch(function (err) { output.textContent = err.message || "检测失败"; })
       .then(function () { btn.disabled = false; });
   });
   loadSettings();
