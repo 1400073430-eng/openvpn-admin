@@ -29,6 +29,7 @@
   "POST /api/easyrsa/import",
   "POST /api/selftest",
   "POST /api/settings/ipv6/upgrade-script",
+  "POST /api/settings/node-check",
   "PUT /api/clients/{name}",
   "PUT /api/dns/{domain_id}",
   "PUT /api/settings"
