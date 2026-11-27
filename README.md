@@ -44,7 +44,7 @@ sudo bash scripts/install.sh --repair
 
 更新前备份 `/opt/openvpn-admin/data`、`/opt/openvpn-admin/.env` 和 `/etc/openvpn`。修复会重部署程序、修正权限并重启服务；请保留 SSH 会话。数据库和现有管理员账号保留，不把 `.env` 中的初始密码当作改密后的当前密码。
 
-安装完成后使用输出的实际地址及初始账号登录。`scripts/upgrade-ipv6-ui.sh` 仅更新系统设置页面及 IPv6 模块，**不会应用本次完整清理及认证修复**，完整升级请使用 `--repair`。
+安装完成后使用输出的实际地址及初始账号登录。旧的 `scripts/upgrade-ipv6-ui.sh` 已停用，避免新旧模块混用；完整升级请从独立源码目录使用 `--repair`。升级后首次打开页面建议强制刷新。
 
 | 命令 | 用途 |
 | --- | --- |
