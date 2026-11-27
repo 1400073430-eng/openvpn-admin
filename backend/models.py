@@ -16,6 +16,8 @@ from . import security
 # ==================== 认证 ====================
 
 class LoginRequest(BaseModel):
+    captcha_id: str = Field(..., min_length=20, max_length=64)
+    captcha_answer: str = Field(..., min_length=5, max_length=5)
     username: str = Field(..., min_length=3, max_length=32)
     password: str = Field(..., min_length=8, max_length=128)
 

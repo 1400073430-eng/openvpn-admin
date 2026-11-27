@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from .. import config
+from ..services import login_guard
 from ..auth import create_access_token, decode_token_claims, get_client_ip, get_current_user
 from ..database import DatabaseError, get_db
 from ..models import ChangePasswordRequest, ChangeUsernameRequest, LoginRequest, LoginResponse
@@ -45,10 +46,19 @@ def _revoke_session(jti: str) -> None:
         )
 
 
+@router.get("/captcha")
+async def captcha(request: Request):
+    import base64
+    ident, png = login_guard.issue(get_client_ip(request))
+    return Response(content=__import__("json").dumps({"id": ident, "image": "data:image/png;base64," + base64.b64encode(png).decode()}), media_type="application/json", headers={"Cache-Control": "no-store"})
+
+
 @router.post("/login", response_model=LoginResponse)
 async def login(req: LoginRequest, request: Request, response: Response):
     """登录成功后签发短期 JWT，并写入 HttpOnly Cookie。"""
     ip = get_client_ip(request)
+    login_guard.throttle("login", ip, 10, 60)
+    login_guard.verify(req.captcha_id, req.captcha_answer, ip)
     try:
         if is_login_locked(req.username, ip):
             log_action(req.username, "登录拒绝", "账号锁定中", ip)

@@ -6,3 +6,5 @@ python-jose[cryptography]==3.5.0
 pydantic==2.13.5
 python-multipart==0.0.22
 argon2-cffi==25.1.0
+
+Pillow==13.0.0
