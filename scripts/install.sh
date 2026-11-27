@@ -1522,13 +1522,16 @@ try:
         print("    body:", resp.read().decode()[:400])
 except Exception as e:
     code = getattr(e, "code", None)
+    if code == 403:
+        print("    本机登录已拒绝；请连接 VPN 后使用隧道内地址验证真实登录。")
+        raise SystemExit(0)
     data = e.read().decode()[:400] if hasattr(e, "read") else str(e)
     print("    HTTP", code)
     print("    body:", data)
     raise SystemExit(1)
 PY
     then
-        log_success "登录 API 正常"
+        log_success "登录接口检查完成（本机 403 仅验证来源限制；登录需在 VPN 内验收）"
     else
         log_fail "登录 API" "仍失败，最近应用日志如下"
         journalctl -u "${APP_NAME}" -n 30 --no-pager 2>/dev/null | grep -E 'ERROR|数据库|登录|Traceback|OperationalError|IntegrityError|Exception|ovpn\.' \

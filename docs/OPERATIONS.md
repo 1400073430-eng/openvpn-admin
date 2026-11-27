@@ -75,3 +75,32 @@ sudo systemctl start openvpn-admin-blacklist.service
 `sudo bash scripts/uninstall.sh` 删除平台和 OpenVPN，包括证书、数据库及双栈迁移备份；不会自动备份。仅取消双栈时按 [IPv6 说明](IPV6.md) 回滚。旧入口 `uninstall-openvpn-admin-complete.sh` 只转发到同一卸载脚本。
 
 卸载只移除专用资源，不恢复其他应用可能共享的系统全局转发开关，不清空整个 nftables 规则集或共享 systemd journal。
+
+## 管理页面仅允许 VPN 访问
+
+管理页面、静态资源和全部 API 均检查真实 TCP 来源地址。公网来源返回 403；
+VPN 来源仍须完成验证码与密码认证。本机回环仅允许 `/api/health` 健康检查。
+生产入口 `python -m backend.main` 禁用 Uvicorn 代理头解析，访问限制也不使用
+`X-Forwarded-For` / `X-Real-IP`。不要改用会信任代理头的启动命令。
+
+启动时优先读取 `OVPM_ADMIN_VPN_CIDRS`（逗号分隔的完整 CIDR）；未设置时，
+从实际 OpenVPN 配置的 `server` 和 `server-ipv6` 指令读取。无法读取、缺少网段或
+配置非法时拒绝启动。自定义拓扑使用显式 CIDR，例如：
+
+```ini
+OVPM_ADMIN_VPN_CIDRS=10.8.0.0/24,fd42:abcd::/64
+```
+
+示例网段必须换成实际 VPN 网段，不能直接照抄。不要填写公网客户端地址、整个
+私网地址范围或默认路由。修改 `.env` 前先保留 SSH 会话并核对 `server.conf`。
+
+连接 OpenVPN 后，使用服务器隧道内地址访问管理页面，例如 `http://10.8.0.1`，
+端口按实际 Web 设置填写。若此前用公网域名/IP 登录，切换到隧道地址；防火墙
+需允许 VPN 接口到 Web 端口。IPv6 需单独允许实际 VPN IPv6 网段；不在白名单内
+的公网 IPv6 来源仍被拒绝。已有反向代理因来源为回环/代理地址会被拒绝，请改用
+VPN 隧道内直连。无需为此改动 OpenVPN 的对外连接端口。
+
+验收：公网访问页面、验证码和登录 API 均应返回 403；VPN 内可打开登录页面，
+未登录访问业务 API 返回 401；本机健康检查返回 200。仅浏览器检测显示出口匹配
+不能替代这一来源检查。来源网段限制不证明客户端证书身份；不要把该网段开放为
+不可信网络，HTTPS 仍可作为额外传输保护。
