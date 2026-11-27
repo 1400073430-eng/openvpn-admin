@@ -99,7 +99,7 @@ async def update_settings(
                 )
 
         log_action(username, "更新系统设置", str(updates), get_client_ip(request))
-        return {"code": 200, "message": "设置已更新", "data": updates}
+        return {"code": 200, "message": "管理平台记录已更新，OpenVPN 配置未修改", "data": updates}
 
     except HTTPException:
         raise

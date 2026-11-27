@@ -21,12 +21,29 @@ def tunnel_addresses(text):
     return list(dict.fromkeys(result))
 
 
-def summary(env_path):
+def read_environment(env_path):
     values = {}
     for line in Path(env_path).read_text(encoding='utf-8').splitlines():
         if '=' in line and not line.lstrip().startswith('#'):
             key, value = line.split('=', 1)
             values[key.strip()] = value.strip()
+    return values
+
+
+def local_health_url(env_path):
+    values = read_environment(env_path)
+    secure = values.get('OVPM_HTTPS_ENABLED') == '1'
+    port = int(values.get('OVPM_HTTPS_PORT', '443') if secure else values.get('OVPM_WEB_PORT', '80'))
+    if not 1 <= port <= 65535:
+        raise ValueError('管理端口配置无效')
+    host = values.get('OVPM_WEB_HOST', '0.0.0.0')
+    address = ipaddress.ip_address({'0.0.0.0': '127.0.0.1', '::': '::1'}.get(host, host))
+    host = '[' + str(address) + ']' if address.version == 6 else str(address)
+    return ('https' if secure else 'http') + '://' + host + ':' + str(port) + '/api/health'
+
+
+def summary(env_path):
+    values = read_environment(env_path)
     paths = [values.get('OVPM_OVPN_CONFIG', ''), '/etc/openvpn/server/server.conf', '/etc/openvpn/server.conf']
     config_path = next((Path(p) for p in paths if p and Path(p).is_file()), None)
     if not config_path:
@@ -48,8 +65,12 @@ def summary(env_path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--env', required=True)
+    parser.add_argument('--local-health', action='store_true')
     args = parser.parse_args()
     try:
+        if args.local_health:
+            print(local_health_url(args.env))
+            return 0
         for url in summary(args.env):
             print('   ' + url)
         print('   地址根据 VPN 配置推导；如为自定义拓扑，请核对隧道接口实际地址。')

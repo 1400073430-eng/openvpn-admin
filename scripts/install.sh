@@ -17,7 +17,7 @@
 # 用法：
 #   sudo bash install.sh              # 全新安装 / 覆盖升级
 #   sudo bash install.sh --repair     # 仅修复：清旧入口、重部署、重写 systemd、校验登录/证书
-#   sudo bash install.sh --diagnose   # 仅诊断：数据库、登录 API、证书链路（不改代码）
+#   sudo bash install.sh --diagnose   # 诊断数据库、访问限制与证书；会修复数据权限及初始化缺失表
 #   sudo bash install.sh --fix-certs  # 仅修复证书链路（systemd 提权 + PKI 权限）
 # ============================================================
 
@@ -49,6 +49,8 @@ VPN_PORT=1194
 
 # 运行模式：install | repair | diagnose | fix-certs
 RUN_MODE="install"
+CHECK_FAILURES=0
+INITIAL_CREDENTIALS_REUSED=0
 
 # 脚本自身目录（用于定位内嵌 Nyr 安装器）
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -65,6 +67,7 @@ log_success() {
 
 # 失败提示（带原因）
 log_fail() {
+    CHECK_FAILURES=$((CHECK_FAILURES + 1))
     echo -e "${RED}【失败】${NC} $1"
     echo -e "${RED}       原因：${NC} $2"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [失败] $1 | 原因: $2" >> "$LOG_FILE"
@@ -99,7 +102,7 @@ init_install() {
                 echo "用法: sudo bash install.sh [--install|--repair|--diagnose|--fix-certs]"
                 echo "  --install    全新安装 / 覆盖升级（默认）"
                 echo "  --repair     修复启动/登录/证书（清旧入口、重部署、重写 systemd、修 PKI 权限）"
-                echo "  --diagnose   仅诊断登录、数据库、证书链路（不改动代码）"
+                echo "  --diagnose   诊断登录、数据库、证书链路（会修复数据权限并初始化缺失表，不是只读检查）"
                 echo "  --fix-certs  仅修复证书链路（NoNewPrivileges / PKI 权限 / root 任务队列）"
                 exit 0
                 ;;
@@ -584,6 +587,7 @@ setup_app_config() {
         [[ "$old_web_port" =~ ^[0-9]+$ ]] && WEB_PORT="$old_web_port"
         [[ -n "$old_web_host" ]] && WEB_HOST="$old_web_host"
         DEFAULT_ADMIN_USER=${DEFAULT_ADMIN_USER:-admin}
+        INITIAL_CREDENTIALS_REUSED=1
         log_info "检测到已有 .env，保留 JWT 与管理员口令（不重新生成）"
     else
         # 生成随机 JWT 密钥与一次性管理员初始密码（不再使用源码固定密码）
@@ -1073,28 +1077,30 @@ EOF
 # ============================================================
 # 第12步：配置防火墙
 # ============================================================
+configured_health_url() {
+    PYTHONPATH="${INSTALL_DIR}" "${INSTALL_DIR}/venv/bin/python" -m backend.services.admin_address --env "${INSTALL_DIR}/.env" --local-health
+}
+
 setup_firewall() {
     log_info "配置防火墙..."
 
-    # 检测防火墙类型
+    local health_url manage_port transport
+    health_url=$(configured_health_url) || { log_fail "防火墙配置" "无法读取实际管理端口"; return 1; }
+    manage_port=${health_url##*:}; manage_port=${manage_port%%/*}
+    case "${VPN_PROTO:-udp}" in tcp*) transport=tcp ;; *) transport=udp ;; esac
     if command -v ufw &>/dev/null && ufw status | grep -q "Status: active"; then
-        ufw allow "${WEB_PORT}/tcp" >> "$LOG_FILE" 2>&1
-        if [[ "${HTTPS_ENABLED:-0}" == "1" ]]; then ufw allow 443/tcp >> "$LOG_FILE" 2>&1; fi
-        ufw allow "${VPN_PORT}/udp" >> "$LOG_FILE" 2>&1
-        log_success "UFW 防火墙放行端口: ${WEB_PORT}/tcp${HTTPS_ENABLED:+, 443/tcp}, ${VPN_PORT}/udp"
+        ufw allow "${manage_port}/tcp" >> "$LOG_FILE" 2>&1
+        ufw allow "${VPN_PORT}/${transport}" >> "$LOG_FILE" 2>&1
     elif command -v firewall-cmd &>/dev/null && firewall-cmd --state &>/dev/null 2>&1; then
-        firewall-cmd --permanent --add-port="${WEB_PORT}/tcp" >> "$LOG_FILE" 2>&1
-        if [[ "${HTTPS_ENABLED:-0}" == "1" ]]; then firewall-cmd --permanent --add-port=443/tcp >> "$LOG_FILE" 2>&1; fi
-        firewall-cmd --permanent --add-port="${VPN_PORT}/udp" >> "$LOG_FILE" 2>&1
+        firewall-cmd --permanent --add-port="${manage_port}/tcp" >> "$LOG_FILE" 2>&1
+        firewall-cmd --permanent --add-port="${VPN_PORT}/${transport}" >> "$LOG_FILE" 2>&1
         firewall-cmd --reload >> "$LOG_FILE" 2>&1
-        log_success "firewalld 放行端口: ${WEB_PORT}/tcp, ${VPN_PORT}/udp"
     else
-        # 使用 iptables（-w 5 等待 xtables 锁，避免并发失败）
-        iptables -w 5 -I INPUT -p tcp --dport "${WEB_PORT}" -j ACCEPT >> "$LOG_FILE" 2>&1
-        if [[ "${HTTPS_ENABLED:-0}" == "1" ]]; then iptables -w 5 -I INPUT -p tcp --dport 443 -j ACCEPT >> "$LOG_FILE" 2>&1; fi
-        iptables -w 5 -I INPUT -p udp --dport "${VPN_PORT}" -j ACCEPT >> "$LOG_FILE" 2>&1
-        log_success "iptables 放行端口: ${WEB_PORT}/tcp, ${VPN_PORT}/udp"
+        iptables -w 5 -I INPUT -p tcp --dport "${manage_port}" -j ACCEPT >> "$LOG_FILE" 2>&1
+        iptables -w 5 -I INPUT -p "${transport}" --dport "${VPN_PORT}" -j ACCEPT >> "$LOG_FILE" 2>&1
     fi
+    log_success "已添加防火墙放行规则：管理 ${manage_port}/tcp，VPN ${VPN_PORT}/${transport}"
+    log_info "管理页面仍由应用限制为 VPN 来源；端口放行不代表公网可以登录。"
 }
 
 
@@ -1416,7 +1422,7 @@ fix_certs_pipeline() {
     systemctl restart "${APP_NAME}" 2>/dev/null || true
     sleep 2
     diagnose_certs || true
-    log_info "证书链路修复完成。请在网页验证：「同步已有证书」「新增客户端」"
+    log_info "证书修复步骤执行结束，请检查上方结果；连接 VPN 后验证同步和新增客户端。"
     log_info "若创建仍失败，用新名称试：如 test01（避免与 EasyRSA 中已有 fjz 冲突）"
 }
 
@@ -1520,57 +1526,24 @@ print('    backend.database OK')
     fi
 
     echo ""
-    log_info "  调用登录 API POST /api/auth/login"
-    export DIAG_LOGIN_USER="${login_user}"
-    export DIAG_LOGIN_PASS="${login_pass}"
-    if sudo -u "${APP_USER}" env \
-        DIAG_LOGIN_USER="${login_user}" \
-        DIAG_LOGIN_PASS="${login_pass}" \
-        python3 - <<'PY'
-import json, os, urllib.request
-user = os.environ.get("DIAG_LOGIN_USER", "admin")
-password = os.environ.get("DIAG_LOGIN_PASS", "")
-body = json.dumps({"username": user, "password": password}).encode()
-req = urllib.request.Request(
-    "http://127.0.0.1/api/auth/login",
-    data=body,
-    headers={"Content-Type": "application/json"},
-    method="POST",
-)
-try:
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        print("    HTTP", resp.status)
-        print("    body:", resp.read().decode()[:400])
-except Exception as e:
-    code = getattr(e, "code", None)
-    if code == 403:
-        print("    本机登录已拒绝；请连接 VPN 后使用隧道内地址验证真实登录。")
-        raise SystemExit(0)
-    data = e.read().decode()[:400] if hasattr(e, "read") else str(e)
-    print("    HTTP", code)
-    print("    body:", data)
-    raise SystemExit(1)
-PY
-    then
-        log_success "登录接口检查完成（本机 403 仅验证来源限制；登录需在 VPN 内验收）"
-    else
-        log_fail "登录 API" "仍失败，最近应用日志如下"
-        journalctl -u "${APP_NAME}" -n 30 --no-pager 2>/dev/null | grep -E 'ERROR|数据库|登录|Traceback|OperationalError|IntegrityError|Exception|ovpn\.' \
-            || journalctl -u "${APP_NAME}" -n 30 --no-pager 2>/dev/null || true
-    fi
+    log_info "本机不执行密码登录测试：后台仅允许 VPN 来源，且登录需要一次性验证码。"
+    log_info "请连接 VPN 后打开安装结果中的隧道内地址，完成验证码与密码登录验收。"
 }
 
 verify_install() {
     log_info "执行部署验证..."
 
     # 等待 Web 启动（uvicorn 绑定/装路由需要时间）
-    local i health_ok=0 port_ok=0
+    local i health_ok=0 port_ok=0 health_url manage_port
+    health_url=$(configured_health_url) || { log_fail "健康检查配置" "无法读取实际管理协议/端口"; return 1; }
+    manage_port=${health_url##*:}; manage_port=${manage_port%%/*}
+    log_info "检查已配置的本机管理端点：${health_url}（仅验证可用性，不验证 TLS 证书信任）"
     for i in 1 2 3 4 5 6 7 8 9 10; do
         sleep 1
-        if ! port_ok && ss -lnt 2>/dev/null | grep -qE ":${WEB_PORT}\\b"; then
+        if [[ "$port_ok" -eq 0 ]] && ss -lnt 2>/dev/null | grep -qE ":${manage_port}\\b"; then
             port_ok=1
         fi
-        if curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${WEB_PORT}/api/health" 2>/dev/null | grep -q "200"; then
+        if curl --noproxy '*' -k -s --connect-timeout 2 --max-time 3 -o /dev/null -w "%{http_code}" "$health_url" 2>/dev/null | grep -q "200"; then
             health_ok=1
             break
         fi
@@ -1579,14 +1552,14 @@ verify_install() {
     if [[ "$health_ok" -eq 1 ]]; then
         log_success "Web 服务健康检查通过"
     else
-        log_warn "Web 服务健康检查未通过（等待 10s），请检查 journalctl -u ${APP_NAME}"
+        log_fail "Web 服务健康检查" "限定重试内未通过，请检查 journalctl -u ${APP_NAME}"
         journalctl -u "${APP_NAME}" -n 20 --no-pager 2>/dev/null | grep -E 'error|Error|bind|Permission|address|Traceback|listen' | tail -10 | sed 's/^/    /' || true
     fi
 
-    if [[ "$port_ok" -eq 1 ]] || ss -lnt 2>/dev/null | grep -qE ":${WEB_PORT}\\b"; then
-        log_success "端口 ${WEB_PORT} 已监听"
+    if [[ "$port_ok" -eq 1 ]] || ss -lnt 2>/dev/null | grep -qE ":${manage_port}\\b"; then
+        log_success "端口 ${manage_port} 已监听"
     else
-        log_warn "端口 ${WEB_PORT} 未监听（特权端口需 CAP_NET_BIND_SERVICE）"
+        log_fail "端口 ${manage_port} 未监听" "特权端口需 CAP_NET_BIND_SERVICE；请检查服务日志"
     fi
 
     # 检查数据库 + 登录链路
@@ -1659,7 +1632,13 @@ verify_install() {
 print_summary() {
     echo ""
     echo "============================================================"
-    echo -e "${GREEN}       安装完成！${NC}"
+    if [[ "$CHECK_FAILURES" -gt 0 ]]; then
+        echo -e "${YELLOW}       操作结束：有 ${CHECK_FAILURES} 项检查失败，请先处理${NC}"
+    elif [[ "$RUN_MODE" == "repair" ]]; then
+        echo -e "${GREEN}       修复步骤执行完成，VPN 内登录待验收${NC}"
+    else
+        echo -e "${GREEN}       安装步骤执行完成，VPN 内登录待验收${NC}"
+    fi
     echo "============================================================"
     echo ""
     echo "📌 管理平台仅允许 VPN 网络访问："
@@ -1671,7 +1650,7 @@ print_summary() {
     echo ""
     echo "🔐 初始管理员账号（已改名时以现有数据库账号为准）："
     echo "   用户名：${DEFAULT_ADMIN_USER}"
-    if [[ "$RUN_MODE" == "repair" || "$RUN_MODE" == "diagnose" ]]; then
+    if [[ "$RUN_MODE" == "repair" || "$RUN_MODE" == "diagnose" || "$INITIAL_CREDENTIALS_REUSED" -eq 1 ]]; then
         echo "   密码：  （保留数据库中的现有密码；.env 仅保存初始化口令，可能不是当前密码）"
     else
         echo "   密码：  ${DEFAULT_ADMIN_PASSWORD}"
@@ -1684,7 +1663,7 @@ print_summary() {
     echo ""
     echo "🔧 常用命令："
     echo "   sudo bash scripts/install.sh --repair     # 启动失败/登录异常时修复"
-    echo "   sudo bash scripts/install.sh --diagnose   # 仅诊断登录、数据库、证书链路"
+    echo "   sudo bash scripts/install.sh --diagnose   # 诊断并修复数据权限、初始化缺失表；非只读"
     echo "   sudo bash scripts/install.sh --fix-certs  # 证书操作失败/导入失败时修复"
     echo "   journalctl -u ${APP_NAME} -f"
     echo ""
@@ -1697,7 +1676,6 @@ print_summary() {
     echo "   sudo ovpn-client-quick sync-hint        # 检查网页签发/同步依赖"
     echo ""
     echo "============================================================"
-    echo "============================================================"
     echo ""
     echo "📖 详细操作说明请查看: ${INSTALL_DIR}/docs/OPERATIONS.md"
     echo ""
@@ -1709,7 +1687,7 @@ print_summary() {
 main() {
     init_install "$@"
 
-    # ---- 仅诊断：不改代码，只查登录/数据库/证书 ----
+    # ---- 诊断：检查数据库/证书，修复数据权限并初始化缺失表 ----
     if [[ "$RUN_MODE" == "diagnose" ]]; then
         check_ubuntu
         # 读取现有 .env 端口用于展示
@@ -1720,7 +1698,7 @@ main() {
         fix_data_permissions
         diagnose_login
         diagnose_certs
-        exit 0
+        exit "$((CHECK_FAILURES > 0))"
     fi
 
     # ---- 仅修复证书链路：systemd 提权 + PKI 权限 ----
@@ -1731,7 +1709,7 @@ main() {
             [[ "$wp" =~ ^[0-9]+$ ]] && WEB_PORT="$wp"
         fi
         fix_certs_pipeline
-        exit 0
+        exit "$((CHECK_FAILURES > 0))"
     fi
 
     # ---- 修复模式：清旧入口、重部署、重写 systemd、校验登录/证书 ----
@@ -1762,7 +1740,7 @@ main() {
         fix_data_permissions
         verify_install
         print_summary
-        exit 0
+        exit "$((CHECK_FAILURES > 0))"
     fi
 
     # ---- 默认：完整安装 / 覆盖升级 ----
@@ -1788,5 +1766,5 @@ main() {
 # 执行主流程
 main "$@"
 
-exit 0
+exit "$((CHECK_FAILURES > 0))"
 
