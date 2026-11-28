@@ -61,12 +61,19 @@ cmd_list() {
     fi
     echo "===== 客户端列表 ====="
     echo "状态 | 名称 | 序列"
-    tail -n +2 "$INDEX" | while IFS=$'\t' read -r flag _e _r serial _u cn; do
-        name=$(echo "$cn" | grep -oE 'CN=[^/]*' | head -1 | cut -d= -f2)
-        [[ -z "$name" ]] && continue
-        case "$flag" in V) st="启用" ;; R) st="吊销" ;; E) st="过期" ;; *) st="$flag" ;; esac
-        echo "$st | $name | $serial"
-    done
+    awk -F '\t' '
+        NF >= 6 {
+            flag = $1; serial = $4; subject = $6
+            if (match(subject, /\/CN=[^/]+/)) {
+                name = substr(subject, RSTART + 4, RLENGTH - 4)
+                if (flag == "V") state = "启用"
+                else if (flag == "R") state = "吊销"
+                else if (flag == "E") state = "过期"
+                else state = flag
+                print state " | " name " | " serial
+            }
+        }
+    ' "$INDEX"
 }
 cmd_add() {
     local client="$1"

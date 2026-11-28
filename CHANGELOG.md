@@ -19,6 +19,7 @@
 - 前端资源使用内容摘要版本参数，降低升级后缓存混版风险；旧的局部 IPv6 升级脚本停用。
 - 将 Pillow 固定为目标 Python 3.10 可安装的 12.3.0；统一开发测试依赖为 `requirements-dev.txt`。
 - 修正从 Windows 打包时无扩展名的 root worker 可能带 CRLF 换行、导致 systemd 无法执行的问题；安装时也会规范化已部署 helper 的换行。
+- 修正 SSH 备用 CLI 读取 EasyRSA 索引时跳过首行且无法处理空吊销日期字段，导致 `list` 不显示客户端的问题。
 - 升级前应备份数据库、`.env` 和 OpenVPN 配置；完整升级使用独立源码目录中的 `scripts/install.sh --repair`，升级后从 VPN 内验收登录与管理操作。
 
 ### 验证
