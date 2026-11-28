@@ -268,6 +268,25 @@ def _read_server_conf_net() -> tuple:
 
 VPN_PROTO, VPN_PORT = _read_server_conf_net()
 
+
+def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if minimum <= value <= maximum else default
+
+
+# OpenVPN transport tuning. The installer writes the same values to server and
+# client templates; these values cover the backend fallback config generator.
+OPENVPN_TUN_MTU = _bounded_int("OVPM_TUN_MTU", 1500, 1200, 2000)
+OPENVPN_MSSFIX = _bounded_int("OVPM_MSSFIX", 1400, 900, 1900)
+OPENVPN_SNDBUF = _bounded_int("OVPM_SNDBUF", 524288, 65536, 4194304)
+OPENVPN_RCVBUF = _bounded_int("OVPM_RCVBUF", 524288, 65536, 4194304)
+OPENVPN_KEEPALIVE_PING = _bounded_int("OVPM_KEEPALIVE_PING", 10, 5, 60)
+OPENVPN_KEEPALIVE_TIMEOUT = _bounded_int("OVPM_KEEPALIVE_TIMEOUT", 120, 30, 600)
+OPENVPN_KICK_BLOCK_SECONDS = _bounded_int("OVPM_KICK_BLOCK_SECONDS", 300, 30, 3600)
+
 WEB_PORT = int(os.environ.get("OVPM_WEB_PORT", "80"))
 WEB_HOST = os.environ.get("OVPM_WEB_HOST", "0.0.0.0")
 

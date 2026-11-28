@@ -450,6 +450,66 @@ setup_openvpn() {
 # 第8步：生成 OpenVPN 服务器配置
 # ============================================================
 setup_openvpn_config() {
+    local tuning_env="${INSTALL_DIR:-/opt/openvpn-admin}/.env"
+    local tun_mtu=1500 mssfix=1400 sndbuf=524288 rcvbuf=524288 keepalive_ping=10 keepalive_timeout=120
+    local _key _value
+    if [[ -f "$tuning_env" ]]; then
+        while IFS='=' read -r _key _value; do
+            _value=${_value%$'\r'}
+            case "$_key" in
+                OVPM_TUN_MTU) [[ "$_value" =~ ^[0-9]+$ ]] && tun_mtu="$_value" ;;
+                OVPM_MSSFIX) [[ "$_value" =~ ^[0-9]+$ ]] && mssfix="$_value" ;;
+                OVPM_SNDBUF) [[ "$_value" =~ ^[0-9]+$ ]] && sndbuf="$_value" ;;
+                OVPM_RCVBUF) [[ "$_value" =~ ^[0-9]+$ ]] && rcvbuf="$_value" ;;
+                OVPM_KEEPALIVE_PING) [[ "$_value" =~ ^[0-9]+$ ]] && keepalive_ping="$_value" ;;
+                OVPM_KEEPALIVE_TIMEOUT) [[ "$_value" =~ ^[0-9]+$ ]] && keepalive_timeout="$_value" ;;
+            esac
+        done < "$tuning_env"
+    fi
+    _bounded_tuning() {
+        local value="$1" fallback="$2" minimum="$3" maximum="$4"
+        if [[ "$value" =~ ^[0-9]+$ ]] && (( value >= minimum && value <= maximum )); then
+            printf '%s' "$value"
+        else
+            printf '%s' "$fallback"
+        fi
+    }
+    tun_mtu=$(_bounded_tuning "$tun_mtu" 1500 1200 2000)
+    mssfix=$(_bounded_tuning "$mssfix" 1400 900 1900)
+    sndbuf=$(_bounded_tuning "$sndbuf" 524288 65536 4194304)
+    rcvbuf=$(_bounded_tuning "$rcvbuf" 524288 65536 4194304)
+    keepalive_ping=$(_bounded_tuning "$keepalive_ping" 10 5 60)
+    keepalive_timeout=$(_bounded_tuning "$keepalive_timeout" 120 30 600)
+    _append_missing() {
+        local file="$1" key="$2" value="$3"
+        grep -qE "^[[:space:]]*${key}([[:space:]]|$)" "$file" 2>/dev/null || printf '%s\n' "$value" >> "$file"
+    }
+    _tune_server() {
+        local file="$1"
+        _append_missing "$file" tun-mtu "tun-mtu ${tun_mtu}"
+        _append_missing "$file" mssfix "mssfix ${mssfix}"
+        _append_missing "$file" mtu-disc "mtu-disc yes"
+        _append_missing "$file" data-ciphers "data-ciphers AES-128-GCM:AES-256-GCM"
+        _append_missing "$file" data-ciphers-fallback "data-ciphers-fallback AES-128-GCM"
+        _append_missing "$file" cipher "cipher AES-128-GCM"
+        _append_missing "$file" sndbuf "sndbuf ${sndbuf}"
+        _append_missing "$file" rcvbuf "rcvbuf ${rcvbuf}"
+        _append_missing "$file" keepalive "keepalive ${keepalive_ping} ${keepalive_timeout}"
+        grep -q '^# fragment 1300' "$file" || printf '%s\n' '# fragment 1300  # 仅在 PMTU 黑洞且 mssfix 无效时临时启用' >> "$file"
+    }
+    _tune_client() {
+        local file="$1"
+        [[ -f "$file" ]] || return 0
+        _append_missing "$file" tun-mtu "tun-mtu ${tun_mtu}"
+        _append_missing "$file" mssfix "mssfix ${mssfix}"
+        _append_missing "$file" mtu-disc "mtu-disc yes"
+        _append_missing "$file" data-ciphers "data-ciphers AES-128-GCM:AES-256-GCM"
+        _append_missing "$file" data-ciphers-fallback "data-ciphers-fallback AES-128-GCM"
+        _append_missing "$file" cipher "cipher AES-128-GCM"
+        _append_missing "$file" sndbuf "sndbuf ${sndbuf}"
+        _append_missing "$file" rcvbuf "rcvbuf ${rcvbuf}"
+        grep -q '^# fragment 1300' "$file" || printf '%s\n' '# fragment 1300  # 仅在 PMTU 黑洞且 mssfix 无效时临时启用' >> "$file"
+    }
     # 若已是 Nyr 布局，只补 status 日志（在线监控需要），不覆盖原配置
     # Ubuntu openvpn-server@ 默认写 /run/openvpn-server/status-server.log（600 root）
     if [[ -f /etc/openvpn/server/server.conf ]]; then
@@ -472,12 +532,9 @@ setup_openvpn_config() {
             sed -i '/^[[:space:]]*status-update[[:space:]]/d' /etc/openvpn/server/server.conf
             log_warn "已移除无效的 status-update 指令；刷新间隔由 status 文件路径后的参数指定"
         fi
-        # OpenVPN 2.5+：仅在未配置 data-ciphers 时补充现代密码套件；
-        # 不强制恢复旧 BF-CBC，也不覆盖用户已有 cipher/data-ciphers 配置。
-        if ! grep -qE '^\s*data-ciphers([[:space:]]|$)' /etc/openvpn/server/server.conf; then
-            echo 'data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305' >> /etc/openvpn/server/server.conf
-            log_success "已补充现代 data-ciphers（不启用旧 BF-CBC）"
-        fi
+        _tune_server /etc/openvpn/server/server.conf
+        _tune_client /etc/openvpn/server/client-common.txt
+        log_success "已核对 MTU、AEAD、缓冲区及 keepalive；已有显式值保持不变"
         return 0
     fi
 
@@ -523,9 +580,19 @@ log-append /var/log/openvpn/openvpn.log
 # 并发连接上限
 max-clients 100
 
+# MTU 与高 RTT 缓冲区
+tun-mtu ${tun_mtu}
+mssfix ${mssfix}
+mtu-disc yes
+# fragment 1300  # 仅在 PMTU 黑洞且 mssfix 无效时临时启用
+sndbuf ${sndbuf}
+rcvbuf ${rcvbuf}
+keepalive ${keepalive_ping} ${keepalive_timeout}
+
 # 压缩与加密
-cipher AES-256-GCM
-data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+cipher AES-128-GCM
+data-ciphers AES-128-GCM:AES-256-GCM
+data-ciphers-fallback AES-128-GCM
 auth SHA256
 persist-key
 persist-tun
@@ -688,7 +755,7 @@ setup_app_config() {
     if [[ -f "${INSTALL_DIR}/.env" ]]; then
         while IFS='=' read -r retained_key retained_value; do
             case "$retained_key" in
-                OVPM_HTTPS_ENABLED|OVPM_HTTPS_PORT|OVPM_SSL_CERT|OVPM_SSL_KEY|OVPM_COOKIE_SECURE|OVPM_COOKIE_SAMESITE|OVPM_AUTH_COOKIE|OVPM_JWT_EXPIRE|OVPM_ALLOWED_ORIGINS|OVPM_TRUSTED_PROXY_IPS)
+                OVPM_HTTPS_ENABLED|OVPM_HTTPS_PORT|OVPM_SSL_CERT|OVPM_SSL_KEY|OVPM_COOKIE_SECURE|OVPM_COOKIE_SAMESITE|OVPM_AUTH_COOKIE|OVPM_JWT_EXPIRE|OVPM_ALLOWED_ORIGINS|OVPM_TRUSTED_PROXY_IPS|OVPM_TUN_MTU|OVPM_MSSFIX|OVPM_SNDBUF|OVPM_RCVBUF|OVPM_KEEPALIVE_PING|OVPM_KEEPALIVE_TIMEOUT|OVPM_KICK_BLOCK_SECONDS)
                     retained_security["$retained_key"]="${retained_value%$'\r'}"
                     ;;
             esac
@@ -712,6 +779,13 @@ OVPM_HTTPS_PORT=443
 OVPM_ALLOWED_ORIGINS=
 OVPM_VPN_PORT=${VPN_PORT}
 OVPM_VPN_PROTO=${VPN_PROTO:-udp}
+OVPM_TUN_MTU=1500
+OVPM_MSSFIX=1400
+OVPM_SNDBUF=524288
+OVPM_RCVBUF=524288
+OVPM_KEEPALIVE_PING=10
+OVPM_KEEPALIVE_TIMEOUT=120
+OVPM_KICK_BLOCK_SECONDS=300
 OVPM_EASYRSA_DIR=${APP_EASYRSA_DIR}
 OVPM_OPENVPN_DIR=${APP_OPENVPN_DIR}
 OVPM_OVPN_CONFIG=${ovpn_conf}
@@ -1734,8 +1808,11 @@ main() {
             # 修复模式尽量非交互，复用已有 IP
             SERVER_IP=$(grep -E '^OVPM_SERVER_IP=' "${INSTALL_DIR}/.env" | cut -d= -f2- | tr -d ' \r')
             if [[ -z "$SERVER_IP" ]]; then
-                SERVER_IP=$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'src \K\S+' | head -1)
-                SERVER_IP=${SERVER_IP:-$(hostname -I | awk '{print $1}')}
+                SERVER_IP=$(awk '$1=="remote" && $2!="" {print $2; exit}' /etc/openvpn/server/client-common.txt 2>/dev/null || true)
+            fi
+            if [[ -z "$SERVER_IP" ]]; then
+                log_fail "服务器地址配置" "未配置服务器公网 IP/域名，请在 client-common.txt 或 OVPM_SERVER_IP 中设置"
+                exit 1
             fi
             log_info "修复模式复用配置: IP=${SERVER_IP:-auto} PORT=${WEB_PORT}"
         else

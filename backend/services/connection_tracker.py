@@ -82,11 +82,14 @@ class ConnectionTracker:
                 "upload_bps": up,
                 "download_bps": down,
                 "ts": now,
+                "sampled_at": datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
             }
             self._last[key] = {
                 "ts": now,
                 "recv": c.bytes_received,
                 "sent": c.bytes_sent,
+                "common_name": c.common_name,
+                "real_address": c.real_address,
             }
 
             connected_at = c.connected_since
@@ -113,18 +116,31 @@ class ConnectionTracker:
 
         disappeared = set(self._last) - set(current)
         if disappeared:
+            cleanup = []
             with get_db() as conn:
                 for key in disappeared:
+                    previous = self._last.get(key, {})
                     conn.execute(
                         """UPDATE vpn_sessions SET status='offline', disconnected_at=?, last_seen_at=?
                            WHERE session_key=? AND status='online'""",
                         (_now_sql(), _now_sql(), key),
                     )
+                    cleanup.append((previous.get("real_address", ""), previous.get("common_name", "")))
                     self._speed.pop(key, None)
+            for real_address, common_name in cleanup:
+                if real_address and common_name:
+                    try:
+                        ip_only = real_address.rsplit(":", 1)[0]
+                        from .cmd_runner import run_as_root
+                        result = run_as_root(["kick-unblock", ip_only, common_name], timeout=10)
+                        if result.success:
+                            logger.info("会话结束，已检查并回收临时阻断: cn=%s ip=%s", common_name, ip_only)
+                    except Exception:
+                        logger.exception("会话结束时回收临时阻断失败: cn=%s", common_name)
         self._last = {k: self._last[k] for k in current if k in self._last}
 
     def speed_for(self, key: str) -> dict:
-        return self._speed.get(key, {"upload_bps": 0.0, "download_bps": 0.0})
+        return self._speed.get(key, {"upload_bps": 0.0, "download_bps": 0.0, "sampled_at": ""})
 
 
 tracker = ConnectionTracker()

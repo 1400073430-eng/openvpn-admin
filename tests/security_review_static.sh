@@ -29,6 +29,12 @@ echo '[PASS] worker FIFO and queue guards'
 
 grep -q 'O_NOFOLLOW' scripts/privileged/ovpn-admin-priv.py
 grep -q 'root-owned regular file' scripts/privileged/ovpn-admin-priv.py
+grep -q 'kick-block' scripts/privileged/ovpn-admin-priv.py
+grep -q -- '--on-active=' scripts/privileged/ovpn-admin-priv.py
+if grep -q 'iptables-drop' scripts/privileged/ovpn-admin-priv.py; then
+  echo '[FAIL] permanent kick rule operation remains' >&2
+  exit 1
+fi
 echo '[PASS] privileged config file guard'
 
 if command -v node >/dev/null 2>&1; then

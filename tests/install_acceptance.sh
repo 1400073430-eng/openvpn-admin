@@ -1,11 +1,11 @@
 #!/bin/bash
 # ============================================================
-# openvpn-admin v5.0.0 安装验收脚本（在 Ubuntu 服务器上以 root 运行）
+# openvpn-admin v5.1.0 安装验收脚本（在 Ubuntu 服务器上以 root 运行）
 # 用法:
 #   1) 先完成安装或修复:
-#        cd /root/openvpn-admin-v5.0.0/scripts && bash install.sh --repair
+#        cd /root/openvpn-admin-v5.1.0/scripts && bash install.sh --repair
 #   2) 再跑本验收:
-#        bash /root/openvpn-admin-v5.0.0/tests/install_acceptance.sh
+#        bash /root/openvpn-admin-v5.1.0/tests/install_acceptance.sh
 # ============================================================
 set -u
 
@@ -16,7 +16,7 @@ ok()   { echo -e "${GREEN}[PASS]${NC} $1"; PASS=$((PASS+1)); }
 bad()  { echo -e "${RED}[FAIL]${NC} $1"; FAIL=$((FAIL+1)); }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; WARN=$((WARN+1)); }
 
-echo "========== openvpn-admin v5.0.0 安装验收 =========="
+echo "========== openvpn-admin v5.1.0 安装验收 =========="
 echo "时间: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 echo
 
