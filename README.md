@@ -1,6 +1,6 @@
 # OpenVPN Admin
 
-当前版本：**5.0.0**。使用网页管理 OpenVPN 客户端证书、连接状态、连接历史、域名黑名单和服务器网络设置。
+当前版本：**5.1.0**。使用网页管理 OpenVPN 客户端证书、连接状态、连接历史、域名黑名单和服务器网络设置。
 
 前端使用原生 HTML/CSS/JavaScript，后端使用 FastAPI 和 SQLite。Web 进程以 `ovpn-admin` 用户运行，保留 `NoNewPrivileges=true`；证书与黑名单操作由独立 root 任务队列及固定白名单 helper 执行。
 

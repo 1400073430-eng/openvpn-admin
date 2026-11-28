@@ -4,6 +4,7 @@
 - 解析 openvpn-status.log
 - 强制踢下线
 """
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -22,6 +23,7 @@ router = APIRouter(prefix="/api/connections", tags=["在线连接"])
 
 class KickRequest(BaseModel):
     real_address: str = Field(..., min_length=3, max_length=64)
+    common_name: str = Field("", max_length=32)
 
 
 @router.get("")
@@ -55,6 +57,7 @@ async def list_connections(username: str = Depends(get_current_user)):
                 "download_speed_bps": round(spd.get("download_bps", 0.0), 1),
                 "upload_speed_text": format_rate(spd.get("upload_bps", 0.0)),
                 "download_speed_text": format_rate(spd.get("download_bps", 0.0)),
+                "last_sampled_at": spd.get("sampled_at", ""),
             })
         return {"code": 200, "message": "ok", "data": data}
 
@@ -112,12 +115,13 @@ async def kick(
 ):
     """强制将客户端踢下线。"""
     try:
-        success = kick_client(req.real_address)
-        if success:
-            log_action(username, "强制下线", f"地址={req.real_address}", get_client_ip(request))
-            return {"code": 200, "message": "已强制下线", "data": None}
-        else:
-            raise HTTPException(status_code=500, detail="强制下线失败")
+        result = await asyncio.to_thread(kick_client, req.real_address, req.common_name)
+        log_action(
+            username, "强制下线",
+            f"客户端={req.common_name or '-'} 地址={req.real_address} 方式={result['method']}",
+            get_client_ip(request),
+        )
+        return {"code": 200, "message": result["message"], "data": result}
 
     except OpenVPNError as e:
         log_action(username, "强制下线失败", f"{req.real_address}: {e.message}", get_client_ip(request))

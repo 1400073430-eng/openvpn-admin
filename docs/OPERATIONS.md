@@ -43,6 +43,11 @@ sudo ovpn-client-quick sync-hint
 | `OVPM_COOKIE_SECURE` | HTTPS 部署时设置为 `1`，Cookie 只经 HTTPS 发送 |
 | `OVPM_ALLOWED_ORIGINS` | 跨源请求允许列表，逗号分隔；同源部署无需放开 |
 | `OVPM_TRUSTED_PROXY_IPS` | 可信反向代理 IP，逗号分隔；其他来源的转发头不作为真实 IP |
+| `OVPM_SERVER_IP` | 生成客户端配置使用的明确公网 IP 或域名；缺失时依次读取客户端模板和数据库，不猜测默认路由 |
+| `OVPM_TUN_MTU` / `OVPM_MSSFIX` | 新配置 MTU/MSS 默认值，默认 1500/1400 |
+| `OVPM_SNDBUF` / `OVPM_RCVBUF` | OpenVPN 发送/接收缓冲，默认各 524288 字节 |
+| `OVPM_KEEPALIVE_PING` / `OVPM_KEEPALIVE_TIMEOUT` | 服务端 keepalive 周期与超时，默认 10/120 秒 |
+| `OVPM_KICK_BLOCK_SECONDS` | management 不可用时来源阻断上限，默认 300 秒，限制 30–3600 秒 |
 
 改动 `.env` 后重启 Web。root helper 另读取 root 持有的 `/etc/openvpn-admin/privileged.env`，不应通过仅修改 Web 环境来假定 helper 的路径已改变。
 
@@ -54,7 +59,38 @@ HTTPS 生效需要证书与私钥可读。启用内置 HTTPS 后若端口低于 
 
 合法状态刷新设置为 `status /路径/status.log 5`；不使用 `status-update`，参见 [OpenVPN 官方手册](https://build.openvpn.net/man/openvpn-2.6/openvpn.8.html)。平台约每 5 秒采样，速率是相邻样本差分，不是逐包瞬时值。已有合法刷新间隔不会被安装器覆盖，过长间隔会降低显示实时性。
 
-启动前的历史连接无法从状态快照完整重建。强制下线优先使用绑定本机的 management 接口；未配置时备用逻辑在 INPUT 链阻断来源 IPv4，可能影响同一 NAT 出口，且不自动撤销。要恢复来源访问，应检查并删除对应规则，勿清空整个防火墙。
+启动前的历史连接无法从状态快照完整重建。强制下线优先按证书名称使用绑定本机的 management 接口，并轮询状态确认会话消失；未配置或未成功时，备用逻辑在 INPUT 链限时阻断来源 IPv4，默认 300 秒，检测到客户端离线也会提前清理。共享 NAT 出口仍可能短时影响同一来源的其他用户；勿清空整个防火墙。
+
+## OpenVPN 稳定性与吞吐调优
+
+新安装及缺少相应指令的旧配置采用 `tun-mtu 1500`、`mssfix 1400`、`mtu-disc yes`、`sndbuf 524288`、`rcvbuf 524288`。安装修复只补充缺失项，不覆盖管理员已有值。`fragment` 默认保持注释，因为现代网络和防火墙经常丢弃 IP 分片；只应在确认链路必须使用且经过专项测试后启用。
+
+客户端配置默认协商 `AES-128-GCM:AES-256-GCM` 并以 AES-128-GCM 回退。已有客户端仍可连接，只是不会自动得到新的 MTU、缓冲参数；需要重新下载配置并逐台替换。升级会重启 OpenVPN、短暂中断现有隧道，因此应保留独立 SSH 会话并安排维护窗口。此次优化不加入 `float`、额外 `ping-restart` 或激进自动重连参数。
+
+优先使用 UDP；TCP 仅作为 UDP 被网络限制时的兼容入口，不能只改客户端协议而不配置对应服务端实例、防火墙和独立端口。不要在同一配置里盲目堆叠多端口。检查 CPU 是否支持 AES 指令可用：
+
+```bash
+lscpu | grep -i aes || grep -m1 -o '\baes\b' /proc/cpuinfo
+```
+
+MTU 应从客户端到 VPN 内目标实测，逐步降低载荷直到不分片成功；IPv4 常用起点如下，`-s` 不含 28 字节 ICMP/IP 头：
+
+```bash
+ping -M do -s 1472 -c 3 10.8.0.1
+ping -M do -s 1372 -c 3 10.8.0.1
+```
+
+升级前先备份 `.env`、服务端配置和 `client-common.txt`。在维护窗口停止对应 OpenVPN 实例后，可用实际版本支持的配置启动检查确认无未知指令，再恢复 systemd 服务；最终以服务状态和日志为准：
+
+```bash
+openvpn --version
+openvpn --config /etc/openvpn/server/server.conf --verb 4
+systemctl restart openvpn-server@server
+systemctl status openvpn-server@server --no-pager
+journalctl -u openvpn-server@server -n 80 --no-pager
+```
+
+回滚时从升级备份恢复 `server.conf`、`client-common.txt` 和 `.env`，恢复上一版程序与 root helper，再重启 OpenVPN 和 `openvpn-admin`。不要只回滚一侧的加密或 MTU配置。DCO 暂不自动启用；只有服务器与客户端 OpenVPN、内核、驱动及所用指令全部兼容，并完成独立压测后再评估。
 
 ## 黑名单
 

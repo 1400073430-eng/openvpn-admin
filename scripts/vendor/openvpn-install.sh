@@ -288,6 +288,15 @@ key server.key
 dh dh.pem
 auth SHA512
 tls-crypt tc.key
+data-ciphers AES-128-GCM:AES-256-GCM
+data-ciphers-fallback AES-128-GCM
+cipher AES-128-GCM
+tun-mtu 1500
+mssfix 1400
+mtu-disc yes
+sndbuf 524288
+rcvbuf 524288
+# fragment 1300  # Only for a confirmed PMTU black hole when mssfix is insufficient.
 topology subnet
 server 10.8.0.0 255.255.255.0" > /etc/openvpn/server/server.conf
 	# IPv6
@@ -439,6 +448,15 @@ persist-key
 persist-tun
 remote-cert-tls server
 auth SHA512
+data-ciphers AES-128-GCM:AES-256-GCM
+data-ciphers-fallback AES-128-GCM
+cipher AES-128-GCM
+tun-mtu 1500
+mssfix 1400
+mtu-disc yes
+sndbuf 524288
+rcvbuf 524288
+# fragment 1300  # Only for a confirmed PMTU black hole when mssfix is insufficient.
 ignore-unknown-option block-outside-dns
 verb 3" > /etc/openvpn/server/client-common.txt
 	# Enable and start the OpenVPN service

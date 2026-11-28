@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import socket
+import time
 from pathlib import Path
 
 from .. import config
@@ -30,25 +31,56 @@ class OpenVPNError(Exception):
 
 def get_server_ip() -> str:
     """
-    自动获取服务器 IP（优先内网地址）。
-    安装脚本会把配置好的 IP 写入 settings 或环境变量。
+    Return only a configured server address; never guess from a live route.
     """
     # 优先读环境变量
     env_ip = os.environ.get("OVPM_SERVER_IP")
     if env_ip:
         return env_ip
-
     try:
-        # 连接外部地址（不实际发包）获取本机出口 IP
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-        finally:
-            s.close()
-        return ip
+        common = easyrsa_service.read_client_common()
+        for raw in common.splitlines():
+            line = raw.strip()
+            if line.startswith("remote ") and not line.startswith("#"):
+                fields = line.split()
+                if len(fields) >= 2 and fields[1]:
+                    return fields[1]
     except Exception:
-        return "127.0.0.1"
+        pass
+    try:
+        from ..database import get_db
+        with get_db() as conn:
+            row = conn.execute("SELECT value FROM settings WHERE key='server_ip'").fetchone()
+        if row and str(row[0]).strip():
+            return str(row[0]).strip()
+    except Exception:
+        pass
+    raise OpenVPNError("未配置服务器公网 IP/域名，请在 client-common.txt 或 OVPM_SERVER_IP 中设置")
+
+
+def _has_directive(content: str, name: str) -> bool:
+    return bool(re.search(rf"(?mi)^\s*{re.escape(name)}(?:\s|$)", content))
+
+
+def _ensure_client_tuning(content: str) -> str:
+    """Add missing transport defaults without replacing administrator values."""
+    defaults = [
+        ("tun-mtu", f"tun-mtu {config.OPENVPN_TUN_MTU}"),
+        ("mssfix", f"mssfix {config.OPENVPN_MSSFIX}"),
+        ("mtu-disc", "mtu-disc yes"),
+        ("data-ciphers", "data-ciphers AES-128-GCM:AES-256-GCM"),
+        ("data-ciphers-fallback", "data-ciphers-fallback AES-128-GCM"),
+        ("sndbuf", f"sndbuf {config.OPENVPN_SNDBUF}"),
+        ("rcvbuf", f"rcvbuf {config.OPENVPN_RCVBUF}"),
+    ]
+    if not _has_directive(content, "cipher"):
+        defaults.append(("cipher", "cipher AES-128-GCM"))
+    missing = [line for key, line in defaults if not _has_directive(content, key)]
+    if not missing:
+        return content
+    insert_at = content.find("<ca>")
+    block = "\n".join(missing) + "\n"
+    return (content[:insert_at] + block + content[insert_at:]) if insert_at >= 0 else block + content
 
 
 def build_ovpn_config(name: str) -> str:
@@ -81,6 +113,7 @@ def build_ovpn_config(name: str) -> str:
         # EasyRSA inline 通常只有 CA/证书/私钥；tls-crypt 密钥在
         # OpenVPN 目录中，且往往是 root-only。统一补齐缺失的块。
         content = _sanitize_ovpn_pem_blocks(content)
+        content = _ensure_client_tuning(content)
 
         if "<ca>" not in content:
             ca_cert = easyrsa_service.read_ca_cert()
@@ -167,6 +200,14 @@ def build_ovpn_config(name: str) -> str:
         "persist-key",
         "persist-tun",
         "remote-cert-tls server",
+        f"tun-mtu {config.OPENVPN_TUN_MTU}",
+        f"mssfix {config.OPENVPN_MSSFIX}",
+        "mtu-disc yes",
+        "data-ciphers AES-128-GCM:AES-256-GCM",
+        "data-ciphers-fallback AES-128-GCM",
+        "cipher AES-128-GCM",
+        f"sndbuf {config.OPENVPN_SNDBUF}",
+        f"rcvbuf {config.OPENVPN_RCVBUF}",
         "auth SHA512",
         "verb 3",
         "",
@@ -281,7 +322,16 @@ def _validate_ovpn(content: str, name: str) -> None:
     logger.info("ovpn 校验通过: %s", name)
 
 
-def kick_client(real_address: str) -> bool:
+def _session_is_online(real_address: str, common_name: str = "") -> bool:
+    from .status_parser import parse_status_log
+    return any(
+        item.real_address == real_address
+        and (not common_name or item.common_name == common_name)
+        for item in parse_status_log()
+    )
+
+
+def kick_client(real_address: str, common_name: str = "") -> dict:
     """
     强制踢下线客户端。
 
@@ -289,6 +339,8 @@ def kick_client(real_address: str) -> bool:
     """
     if not real_address or ":" not in real_address:
         raise OpenVPNError("无效的客户端地址")
+    if common_name and not is_safe_path_component(common_name):
+        raise OpenVPNError("客户端名称不合法")
 
     # 安全校验：IPv4:端口 严格校验（防 iptables 参数注入）
     from ..security import is_valid_ip_port
@@ -299,7 +351,16 @@ def kick_client(real_address: str) -> bool:
     mgmt_port = os.environ.get("OVPM_OVPN_MGMT_PORT")
     if mgmt_port:
         try:
-            return _kick_via_management(real_address, int(mgmt_port))
+            target = common_name or real_address
+            if _kick_via_management(target, int(mgmt_port)):
+                for _ in range(6):
+                    if not _session_is_online(real_address, common_name):
+                        logger.info("management 主动断开成功: cn=%s address=%s", common_name, real_address)
+                        return {"method": "management", "message": "已通过 management 强制下线"}
+                    time.sleep(0.5)
+                logger.warning("management 返回成功但会话仍在线，转入临时阻断: cn=%s address=%s", common_name, real_address)
+            else:
+                logger.warning("management 不支持或未确认 kill: target=%s", target)
         except Exception as e:
             logger.warning("management 方式踢人失败，尝试备用方案: %s", e)
 
@@ -310,21 +371,24 @@ def kick_client(real_address: str) -> bool:
         if not is_valid_ipv4(ip_only):
             raise OpenVPNError("客户端地址格式不正确")
         result = run_as_root(
-            ["iptables-drop", ip_only],
+            ["kick-block", ip_only, common_name or "unknown", str(config.OPENVPN_KICK_BLOCK_SECONDS)],
             timeout=15,
         )
         if result.success:
-            logger.info("已通过 iptables 阻断客户端: %s", ip_only)
-            return True
+            logger.warning("已添加临时阻断并安排自动回收: cn=%s ip=%s ttl=%ss", common_name, ip_only, config.OPENVPN_KICK_BLOCK_SECONDS)
+            return {
+                "method": "temporary_block",
+                "message": f"management 未确认断开；已临时阻断来源并将在 {config.OPENVPN_KICK_BLOCK_SECONDS} 秒内自动回收",
+            }
     except OpenVPNError:
         raise
     except Exception as e:
         logger.warning("iptables 方式失败: %s", e)
 
-    raise OpenVPNError("强制踢下线失败，请确认 management 接口或 iptables 权限")
+    raise OpenVPNError("management 不支持或未确认断开，临时阻断规则也未能安全创建")
 
 
-def _kick_via_management(real_address: str, port: int) -> bool:
+def _kick_via_management(target: str, port: int) -> bool:
     """
     通过 OpenVPN management interface 踢人。
     management 通常绑定 127.0.0.1:port
@@ -336,7 +400,7 @@ def _kick_via_management(real_address: str, port: int) -> bool:
         # 读取欢迎信息
         s.recv(1024)
         # 发送 kill 命令
-        cmd = f"kill {real_address}\n"
+        cmd = f"kill {target}\n"
         s.sendall(cmd.encode("utf-8"))
         resp = s.recv(1024).decode("utf-8", errors="replace")
         s.close()

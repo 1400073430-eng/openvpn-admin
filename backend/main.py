@@ -84,7 +84,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="OpenVPN 管理平台",
     description="OpenVPN 客户端、连接、域名黑名单与网络设置管理",
-    version="5.0.0",
+    version="5.1.0",
     lifespan=lifespan,
     docs_url="/api/docs",      # Swagger 文档（可按需关闭）
     redoc_url=None,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, re, shutil, subprocess, sys, tempfile
+import hashlib, os, re, shutil, subprocess, sys, tempfile
 from pathlib import Path
 
 # sudo 默认会清理大部分环境变量；root helper 只读取 root-owned 配置文件，
@@ -229,9 +229,48 @@ def copy_crl():
     except Exception: pass
     os.chmod(CRL_FILE,0o644); return 0
 
-def iptables_drop(ip):
+def _kick_comment(name):
+    if not NAME_RE.fullmatch(name):
+        return None
+    return "ovpn-admin-kick:" + name
+
+def kick_unblock(ip, name):
     if not IP_RE.fullmatch(ip): return fail("invalid IPv4")
-    r=run(["/usr/sbin/iptables","-w","5","-I","INPUT","-s",ip,"-j","DROP"],timeout=20); sys.stdout.write(r.stdout); sys.stderr.write(r.stderr); return r.returncode
+    comment = _kick_comment(name)
+    if not comment: return fail("invalid client name")
+    check = ["/usr/sbin/iptables","-w","5","-C","INPUT","-s",ip,"-m","comment","--comment",comment,"-j","DROP"]
+    delete = ["/usr/sbin/iptables","-w","5","-D","INPUT","-s",ip,"-m","comment","--comment",comment,"-j","DROP"]
+    while run(check, timeout=20).returncode == 0:
+        result = run(delete, timeout=20)
+        if result.returncode != 0:
+            sys.stderr.write(result.stderr); return result.returncode
+    return 0
+
+def kick_block(ip, name, ttl_text):
+    if not IP_RE.fullmatch(ip): return fail("invalid IPv4")
+    comment = _kick_comment(name)
+    if not comment: return fail("invalid client name")
+    try: ttl = int(ttl_text)
+    except ValueError: return fail("invalid kick TTL")
+    if not 30 <= ttl <= 3600: return fail("invalid kick TTL")
+    check = ["/usr/sbin/iptables","-w","5","-C","INPUT","-s",ip,"-m","comment","--comment",comment,"-j","DROP"]
+    if run(check, timeout=20).returncode == 0:
+        return 0
+    add = ["/usr/sbin/iptables","-w","5","-I","INPUT","-s",ip,"-m","comment","--comment",comment,"-j","DROP"]
+    result = run(add, timeout=20)
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr); return result.returncode
+    unit = "ovpn-admin-kick-" + hashlib.sha256((ip+"|"+name).encode()).hexdigest()[:16]
+    timer = run([
+        "/usr/bin/systemd-run", "--quiet", "--collect", "--unit="+unit,
+        "--on-active="+str(ttl)+"s", "/usr/local/sbin/ovpn-admin-priv",
+        "kick-unblock", ip, name,
+    ], timeout=20)
+    if timer.returncode != 0:
+        run(["/usr/sbin/iptables","-w","5","-D","INPUT","-s",ip,"-m","comment","--comment",comment,"-j","DROP"], timeout=20)
+        sys.stderr.write("temporary rule scheduler failed: "+timer.stderr)
+        return timer.returncode or 1
+    return 0
 
 def blacklist_sync():
     sync = Path("/usr/local/sbin/ovpn-admin-blacklist-sync")
@@ -257,7 +296,8 @@ def main():
     if op=="copy-client-files" and len(sys.argv)==3: return copy_client_files(sys.argv[2])
     if op=="read-client-file" and len(sys.argv)==3: return read_client_file(sys.argv[2])
     if op=="copy-crl" and len(sys.argv)==2: return copy_crl()
-    if op=="iptables-drop" and len(sys.argv)==3: return iptables_drop(sys.argv[2])
+    if op=="kick-block" and len(sys.argv)==5: return kick_block(sys.argv[2],sys.argv[3],sys.argv[4])
+    if op=="kick-unblock" and len(sys.argv)==4: return kick_unblock(sys.argv[2],sys.argv[3])
     if op=="blacklist-sync" and len(sys.argv)==2: return blacklist_sync()
     if op=="blacklist-clear" and len(sys.argv)==2: return blacklist_clear()
     return fail("operation not allowed")

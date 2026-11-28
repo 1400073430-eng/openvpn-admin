@@ -20,19 +20,25 @@ class InstallConfigTests(unittest.TestCase):
             conf = base / 'etc/server/server.conf'
             conf.parent.mkdir(parents=True)
             conf.write_text(content)
+            client_common = base / 'etc/server/client-common.txt'
+            client_common.write_text('client\nremote vpn.example 1194\nmssfix 1320\n')
             prelude = 'set -euo pipefail\nlog_info(){ :; }; log_success(){ :; }; log_warn(){ :; }\n'
             subprocess.run(['bash', '-c', prelude + function + '\nsetup_openvpn_config\n'], check=True, capture_output=True, text=True, timeout=5)
-            return conf.read_text()
+            return conf.read_text(), client_common.read_text()
 
     def test_remove_invalid_directive_and_keep_existing_crypto(self):
-        result = self.repair('server 10.8.0.0 255.255.255.0\nstatus-update 5\ndata-ciphers AES-128-GCM\ntls-crypt tc.key\n')
+        result, client = self.repair('server 10.8.0.0 255.255.255.0\nstatus-update 5\ndata-ciphers AES-128-GCM\ntls-crypt tc.key\n')
         self.assertNotIn('status-update', result)
         self.assertIn('data-ciphers AES-128-GCM', result)
         self.assertIn('tls-crypt tc.key', result)
         self.assertRegex(result, r'status .+status-server\.log 5\n')
+        self.assertIn('mssfix 1320', client)
+        self.assertNotIn('mssfix 1400', client)
+        for expected in ('tun-mtu 1500', 'mtu-disc yes', 'data-ciphers AES-128-GCM:AES-256-GCM', 'sndbuf 524288', 'rcvbuf 524288'):
+            self.assertIn(expected, client)
 
     def test_preserve_existing_status_interval(self):
-        result = self.repair('status /custom/status.log 15\nstatus-version 2\n')
+        result, _client = self.repair('status /custom/status.log 15\nstatus-version 2\n')
         self.assertEqual(result.count('status '), 1)
         self.assertIn('status /custom/status.log 15', result)
 
